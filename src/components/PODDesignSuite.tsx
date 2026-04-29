@@ -43,7 +43,611 @@ import {
   type TextSettings,
   type Transform,
 } from "@/lib/podforge";
+import { parseCsvByHeaders, parseSimpleList } from "../lib/design/csvParser";
+import { parseTemplatePlaceholders } from "../lib/design/placeholderParser";
 import styles from "./PODDesignSuite.module.css";
+import { parseTemplateInput } from "@/lib/templateParser";
+
+type ToolTab = "templates" | "graphic" | "pattern" | "info";
+type Align = "left" | "center" | "right";
+type Transform = "none" | "uppercase" | "lowercase" | "title";
+type TextEffect = "straight" | "archUp" | "archDown" | "circle" | "wave";
+type PreviewBackground = "transparent" | "white" | "black" | "brown" | "cream" | "forest";
+type FontSource = "google" | "custom";
+
+type CustomFont = {
+  name: string;
+  dataUrl: string;
+  format: string;
+};
+
+type GeneratedDesign = {
+  id: string;
+  label: string;
+  filename: string;
+  svg: string;
+};
+
+type ZipProgress = {
+  active: boolean;
+  cancelled: boolean;
+  processed: number;
+  total: number;
+  ok: number;
+  error: number;
+  report: { filename: string; status: "ok" | "error"; message?: string }[];
+}
+
+type MockupPreset = {
+  id: string;
+  name: string;
+  basePngPath: string;
+  printArea: { x: number; y: number; w: number; h: number };
+};
+
+type TextSettings = {
+  fontFamily: string;
+  fontSource: FontSource;
+  color: string;
+  align: Align;
+  lineBreakMode: "single" | "word" | "two";
+  letterSpacing: number;
+  transform: Transform;
+  maxWidth: number;
+  fontSize: number;
+};
+
+type GraphicSettings = {
+  fontFamily: string;
+  fontSource: FontSource;
+  textColor: string;
+  fontSize: number;
+  letterSpacing: number;
+  transform: Transform;
+  effect: TextEffect;
+  curveIntensity: number;
+  sloganPosition: "above" | "below";
+  graphicSize: number;
+  graphicVertical: number;
+  graphicAlign: Align;
+  subText: string;
+  subFontFamily: string;
+  subFontSource: FontSource;
+  subTextColor: string;
+  subFontSize: number;
+  subLetterSpacing: number;
+  subEffect: TextEffect;
+};
+
+type PatternSettings = {
+  fontFamily: string;
+  fontSource: FontSource;
+  fontSize: number;
+  letterSpacing: number;
+  transform: Transform;
+  effect: "straight" | "archUp" | "archDown";
+  curveIntensity: number;
+  outlineColor: string;
+  outlineWidth: number;
+  patternScale: number;
+  patternOffsetX: number;
+  patternOffsetY: number;
+};
+
+type PatternPreset = {
+  id: string;
+  name: string;
+  dataUrl: string;
+};
+type StylePresetType = "text" | "graphic" | "pattern";
+type StylePreset = {
+  id: string;
+  name: string;
+  type: StylePresetType;
+  settings: TextSettings | GraphicSettings | PatternSettings;
+  assetRef?: {
+    kind: "image" | "tile";
+    dataUrl: string;
+  };
+};
+
+const WIDTH = 4500;
+const HEIGHT = 5400;
+const MOCKUP_PRESETS: MockupPreset[] = [
+  { id: "none", name: "No mockup", basePngPath: "", printArea: { x: 0, y: 0, w: 0, h: 0 } },
+  { id: "tee-front-classic", name: "Classic Tee Front", basePngPath: "/forge/mockups/tee-front-classic.png", printArea: { x: 1320, y: 1290, w: 1860, h: 2232 } },
+  { id: "hoodie-front-classic", name: "Classic Hoodie Front", basePngPath: "/forge/mockups/hoodie-front-classic.png", printArea: { x: 1410, y: 1450, w: 1680, h: 2016 } },
+];
+
+const BASE_FONTS = [
+  "Bebas Neue",
+  "Anton",
+  "Archivo Black",
+  "Oswald",
+  "Playfair Display",
+  "Abril Fatface",
+  "DM Serif Display",
+  "Bungee",
+  "Space Grotesk",
+  "Permanent Marker",
+  "Caveat",
+  "Fraunces",
+];
+
+const HEAVY_FONTS = [
+  "Anton",
+  "Archivo Black",
+  "Bebas Neue",
+  "Bungee",
+  "Oswald",
+  "Abril Fatface",
+  "DM Serif Display",
+  "Permanent Marker",
+  "Playfair Display",
+  "Fraunces",
+];
+
+const COLOR_PRESETS = [
+  { label: "Black", value: "#111111" },
+  { label: "White", value: "#FFFFFF" },
+  { label: "Cream", value: "#F5E6D3" },
+  { label: "Rust", value: "#B84A1F" },
+  { label: "Forest", value: "#2D4F3F" },
+  { label: "Mustard", value: "#D4A017" },
+];
+
+const OUTLINE_PRESETS = [
+  { label: "White", value: "#FFFFFF" },
+  { label: "Cream", value: "#F5E6D3" },
+  { label: "Black", value: "#111111" },
+  { label: "Rust", value: "#B84A1F" },
+];
+
+const TEMPLATE_EXAMPLES = [
+  "{hobby} is my cardio",
+  "Powered by coffee and {noun}",
+  "Team {name}",
+  "I paused my {activity} to be here",
+  "{name}'s reading list",
+];
+
+const SLOGAN_EXAMPLES = [
+  "Raised on sweet tea and Jesus",
+  "Born to be wild, forced to work",
+  "Just a girl who loves horses",
+  "Small town girl, big city dreams",
+].join("\n");
+
+const PATTERN_SLOGANS = [
+  "DARLIN'",
+  "MAMA",
+  "HOWDY",
+  "Y'ALL",
+  "HOT MESS",
+  "WILD CHILD",
+  "COWGIRL",
+  "COUNTRY ROOTS",
+].join("\n");
+
+const defaultTextSettings: TextSettings = {
+  fontFamily: "Anton",
+  fontSource: "google",
+  color: "#111111",
+  align: "center",
+  lineBreakMode: "single",
+  letterSpacing: 3,
+  transform: "uppercase",
+  maxWidth: 76,
+  fontSize: 480,
+};
+
+const defaultGraphicSettings: GraphicSettings = {
+  fontFamily: "Anton",
+  fontSource: "google",
+  textColor: "#111111",
+  fontSize: 330,
+  letterSpacing: 8,
+  transform: "uppercase",
+  effect: "archUp",
+  curveIntensity: 60,
+  sloganPosition: "above",
+  graphicSize: 42,
+  graphicVertical: 0,
+  graphicAlign: "center",
+  subText: "NASHVILLE, TN",
+  subFontFamily: "Bebas Neue",
+  subFontSource: "google",
+  subTextColor: "#111111",
+  subFontSize: 210,
+  subLetterSpacing: 10,
+  subEffect: "straight",
+};
+
+const defaultPatternSettings: PatternSettings = {
+  fontFamily: "Anton",
+  fontSource: "google",
+  fontSize: 760,
+  letterSpacing: -5,
+  transform: "uppercase",
+  effect: "straight",
+  curveIntensity: 35,
+  outlineColor: "#FFFFFF",
+  outlineWidth: 34,
+  patternScale: 100,
+  patternOffsetX: 0,
+  patternOffsetY: 0,
+};
+
+function escapeXml(value: string) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
+}
+
+function slugify(value: string) {
+  return value
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 90) || "design";
+}
+
+function parseLines(value: string) {
+  return value
+    .split(/\r?\n/g)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function applyTransform(value: string, transform: Transform) {
+  if (transform === "uppercase") return value.toUpperCase();
+  if (transform === "lowercase") return value.toLowerCase();
+  if (transform === "title") {
+    return value.replace(/\w\S*/g, (word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase());
+  }
+  return value;
+}
+
+function splitText(value: string, mode: TextSettings["lineBreakMode"]) {
+  if (mode === "word") return value.split(/\s+/g).filter(Boolean);
+  if (mode === "two") {
+    const words = value.split(/\s+/g).filter(Boolean);
+    const half = Math.ceil(words.length / 2);
+    return [words.slice(0, half).join(" "), words.slice(half).join(" ")].filter(Boolean);
+  }
+  return [value];
+}
+
+function svgDataUrl(svg: string) {
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+function formatFromMime(mime: string) {
+  if (mime.includes("woff2")) return "woff2";
+  if (mime.includes("woff")) return "woff";
+  if (mime.includes("opentype")) return "opentype";
+  return "truetype";
+}
+
+function fontFaceStyles(customFonts: CustomFont[]) {
+  return customFonts
+    .map(
+      (font) => `@font-face{font-family:'${font.name}';src:url('${font.dataUrl}') format('${font.format}');font-weight:400 900;font-style:normal;}`,
+    )
+    .join("\n");
+}
+
+function lineTextSvg(lines: string[], settings: TextSettings, customFonts: CustomFont[]) {
+  const x = settings.align === "left" ? WIDTH * 0.12 : settings.align === "right" ? WIDTH * 0.88 : WIDTH / 2;
+  const anchor = settings.align === "left" ? "start" : settings.align === "right" ? "end" : "middle";
+  const lineHeight = settings.fontSize * 1.05;
+  const totalHeight = lineHeight * lines.length;
+  const startY = HEIGHT / 2 - totalHeight / 2 + settings.fontSize * 0.85;
+  const customStyle = fontFaceStyles(customFonts);
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}">
+    <defs><style>${customStyle}</style></defs>
+    <rect width="100%" height="100%" fill="transparent"/>
+    <g font-family="${escapeXml(settings.fontFamily)}" font-size="${settings.fontSize}" font-weight="900" fill="${settings.color}" letter-spacing="${settings.letterSpacing}" text-anchor="${anchor}">
+      ${lines
+        .map(
+          (line, index) => `<text x="${x}" y="${startY + index * lineHeight}" dominant-baseline="middle">${escapeXml(line)}</text>`,
+        )
+        .join("\n")}
+    </g>
+  </svg>`;
+}
+
+function pathForEffect(effect: TextEffect | PatternSettings["effect"], intensity: number, y: number, id: string) {
+  const depth = 120 + intensity * 5;
+  if (effect === "archUp") {
+    return `<path id="${id}" d="M 650 ${y} Q ${WIDTH / 2} ${y - depth} ${WIDTH - 650} ${y}" fill="none"/>`;
+  }
+  if (effect === "archDown") {
+    return `<path id="${id}" d="M 650 ${y} Q ${WIDTH / 2} ${y + depth} ${WIDTH - 650} ${y}" fill="none"/>`;
+  }
+  if (effect === "wave") {
+    return `<path id="${id}" d="M 550 ${y} C 1250 ${y - depth} 1600 ${y + depth} 2250 ${y} S 3300 ${y - depth} 3950 ${y}" fill="none"/>`;
+  }
+  return "";
+}
+
+function textWithEffect(params: {
+  textValue: string;
+  effect: TextEffect;
+  intensity: number;
+  y: number;
+  fontFamily: string;
+  fontSize: number;
+  color: string;
+  letterSpacing: number;
+  pathId: string;
+  customFonts: CustomFont[];
+}) {
+  const value = escapeXml(params.textValue);
+  if (params.effect === "straight") {
+    return `<text x="${WIDTH / 2}" y="${params.y}" text-anchor="middle" dominant-baseline="middle" font-family="${escapeXml(params.fontFamily)}" font-size="${params.fontSize}" font-weight="900" fill="${params.color}" letter-spacing="${params.letterSpacing}">${value}</text>`;
+  }
+  if (params.effect === "circle") {
+    return `<defs><path id="${params.pathId}" d="M ${WIDTH / 2} ${params.y - 940} a 940 940 0 1 1 -1 0" fill="none"/></defs>
+      <text font-family="${escapeXml(params.fontFamily)}" font-size="${params.fontSize}" font-weight="900" fill="${params.color}" letter-spacing="${params.letterSpacing}">
+        <textPath href="#${params.pathId}" startOffset="25%" text-anchor="middle">${value}</textPath>
+      </text>`;
+  }
+  const path = pathForEffect(params.effect, params.intensity, params.y, params.pathId);
+  return `<defs>${path}</defs>
+    <text font-family="${escapeXml(params.fontFamily)}" font-size="${params.fontSize}" font-weight="900" fill="${params.color}" letter-spacing="${params.letterSpacing}">
+      <textPath href="#${params.pathId}" startOffset="50%" text-anchor="middle">${value}</textPath>
+    </text>`;
+}
+
+function placeholderGraphic() {
+  const boot = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 900">
+    <rect width="900" height="900" fill="transparent"/>
+    <g transform="translate(250 80)" fill="#d1b07c" stroke="#111" stroke-width="24" stroke-linejoin="round">
+      <path d="M155 20 C265 20 310 82 287 212 L248 464 C240 522 278 558 348 568 L548 596 C616 606 650 642 632 700 C618 746 575 768 503 766 L132 758 C74 756 37 722 45 670 L75 538 C98 445 116 305 105 122 C101 58 115 24 155 20 Z"/>
+      <path d="M95 546 C155 628 248 662 373 666 L616 670" fill="none"/>
+      <path d="M116 102 C164 150 220 176 282 180" fill="none"/>
+      <path d="M116 210 C164 250 213 270 262 270" fill="none"/>
+      <path d="M105 323 C151 356 195 374 238 378" fill="none"/>
+      <path d="M98 444 C142 474 184 488 224 492" fill="none"/>
+    </g>
+  </svg>`;
+  return svgDataUrl(boot);
+}
+
+function buildGraphicSvg(params: {
+  slogan: string;
+  graphicDataUrl: string;
+  settings: GraphicSettings;
+  customFonts: CustomFont[];
+}) {
+  const slogan = applyTransform(params.slogan, params.settings.transform);
+  const imageWidth = WIDTH * (params.settings.graphicSize / 100);
+  const imageHeight = imageWidth;
+  const x = params.settings.graphicAlign === "left" ? WIDTH * 0.1 : params.settings.graphicAlign === "right" ? WIDTH - imageWidth - WIDTH * 0.1 : (WIDTH - imageWidth) / 2;
+  const y = HEIGHT / 2 - imageHeight / 2 + params.settings.graphicVertical * 16;
+  const mainY = params.settings.sloganPosition === "above" ? 1170 : 4140;
+  const subY = params.settings.sloganPosition === "above" ? 4180 : 1070;
+  const customStyle = fontFaceStyles(params.customFonts);
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}">
+    <defs><style>${customStyle}</style></defs>
+    <rect width="100%" height="100%" fill="transparent"/>
+    ${textWithEffect({
+      textValue: slogan,
+      effect: params.settings.effect,
+      intensity: params.settings.curveIntensity,
+      y: mainY,
+      fontFamily: params.settings.fontFamily,
+      fontSize: params.settings.fontSize,
+      color: params.settings.textColor,
+      letterSpacing: params.settings.letterSpacing,
+      pathId: "main-path",
+      customFonts: params.customFonts,
+    })}
+    <image href="${params.graphicDataUrl}" x="${x}" y="${y}" width="${imageWidth}" height="${imageHeight}" preserveAspectRatio="xMidYMid meet"/>
+    ${
+      params.settings.subText.trim()
+        ? textWithEffect({
+            textValue: params.settings.subText.trim(),
+            effect: params.settings.subEffect,
+            intensity: 45,
+            y: subY,
+            fontFamily: params.settings.subFontFamily,
+            fontSize: params.settings.subFontSize,
+            color: params.settings.subTextColor,
+            letterSpacing: params.settings.subLetterSpacing,
+            pathId: "sub-path",
+            customFonts: params.customFonts,
+          })
+        : ""
+    }
+  </svg>`;
+}
+
+function makePatternSvg(name: string, body: string) {
+  return svgDataUrl(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 160">${body}<text x="10" y="150" font-family="Arial" font-size="18" font-weight="900" fill="rgba(255,255,255,.88)" stroke="#111" stroke-width="2">${escapeXml(name)}</text></svg>`);
+}
+
+function getPatternPresets(): PatternPreset[] {
+  return [
+    {
+      id: "realtree-camo",
+      name: "Realtree Camo",
+      dataUrl: makePatternSvg("CAMO", `<rect width="220" height="160" fill="#72522f"/><ellipse cx="45" cy="50" rx="55" ry="22" fill="#2f4325"/><ellipse cx="135" cy="35" rx="60" ry="20" fill="#8a6b35"/><path d="M20 125 C55 80 92 112 130 70 S190 90 218 40" fill="none" stroke="#1f311d" stroke-width="22"/><path d="M5 20 C38 78 82 10 120 72 S175 120 220 80" fill="none" stroke="#b2874c" stroke-width="16"/>`),
+    },
+    {
+      id: "mossy-oak-camo",
+      name: "Mossy Oak",
+      dataUrl: makePatternSvg("MOSS", `<rect width="220" height="160" fill="#1f311d"/><ellipse cx="35" cy="32" rx="58" ry="28" fill="#455f34"/><ellipse cx="132" cy="72" rx="74" ry="34" fill="#24391f"/><ellipse cx="185" cy="28" rx="60" ry="22" fill="#6d7445"/><path d="M0 118 C55 78 104 140 160 86 S200 62 220 76" fill="none" stroke="#0f1d13" stroke-width="24"/>`),
+    },
+    {
+      id: "leopard-print",
+      name: "Leopard",
+      dataUrl: makePatternSvg("LEOPARD", `<rect width="220" height="160" fill="#c99658"/>${Array.from({ length: 18 }).map((_, i) => `<ellipse cx="${(i * 47) % 220}" cy="${25 + ((i * 31) % 115)}" rx="${16 + (i % 3) * 5}" ry="${10 + (i % 2) * 5}" fill="#111"/><ellipse cx="${(i * 47) % 220}" cy="${25 + ((i * 31) % 115)}" rx="${8 + (i % 3) * 3}" ry="${5 + (i % 2) * 3}" fill="#d7ad6b"/>`).join("")}`),
+    },
+    {
+      id: "cow-print",
+      name: "Cow Print",
+      dataUrl: makePatternSvg("COW", `<rect width="220" height="160" fill="#fff"/><path d="M20 10 C68 0 73 35 50 56 C18 84 -20 44 20 10Z" fill="#111"/><path d="M130 20 C190 5 218 38 190 70 C150 110 88 76 130 20Z" fill="#111"/><path d="M48 112 C90 84 126 128 91 158 C58 186 8 142 48 112Z" fill="#111"/>`),
+    },
+    {
+      id: "american-flag",
+      name: "American Flag",
+      dataUrl: makePatternSvg("USA", `${Array.from({ length: 8 }).map((_, i) => `<rect y="${i * 20}" width="220" height="20" fill="${i % 2 ? "#fff" : "#b22234"}"/>`).join("")}<rect width="94" height="86" fill="#3c3b6e"/>${Array.from({ length: 18 }).map((_, i) => `<circle cx="${12 + (i % 6) * 14}" cy="${13 + Math.floor(i / 6) * 22}" r="3" fill="#fff"/>`).join("")}`),
+    },
+    {
+      id: "buffalo-plaid",
+      name: "Buffalo Plaid",
+      dataUrl: makePatternSvg("PLAID", `<rect width="220" height="160" fill="#b31d1d"/>${Array.from({ length: 6 }).map((_, i) => `<rect x="${i * 44}" width="22" height="160" fill="rgba(0,0,0,.55)"/><rect y="${i * 32}" width="220" height="16" fill="rgba(0,0,0,.55)"/>`).join("")}`),
+    },
+    {
+      id: "western-floral",
+      name: "Western Floral",
+      dataUrl: makePatternSvg("FLORAL", `<rect width="220" height="160" fill="#f4e2c9"/>${Array.from({ length: 10 }).map((_, i) => `<circle cx="${20 + (i * 43) % 200}" cy="${25 + (i * 29) % 110}" r="13" fill="#b66a6f"/><circle cx="${20 + (i * 43) % 200}" cy="${25 + (i * 29) % 110}" r="5" fill="#7c3e42"/><path d="M${25 + (i * 43) % 200} ${30 + (i * 29) % 110} q20 5 28 -14" stroke="#678456" stroke-width="7" fill="none"/>`).join("")}`),
+    },
+    {
+      id: "wood-grain",
+      name: "Wood Grain",
+      dataUrl: makePatternSvg("WOOD", `<rect width="220" height="160" fill="#9b6332"/>${Array.from({ length: 9 }).map((_, i) => `<path d="M0 ${i * 18 + 8} C60 ${i * 18 - 22} 120 ${i * 18 + 48} 220 ${i * 18 + 4}" fill="none" stroke="#5d351b" stroke-width="6"/>`).join("")}<ellipse cx="105" cy="80" rx="30" ry="16" fill="none" stroke="#5d351b" stroke-width="5"/>`),
+    },
+    {
+      id: "sunflower-field",
+      name: "Sunflower",
+      dataUrl: makePatternSvg("SUN", `<rect width="220" height="160" fill="#f4dd86"/>${Array.from({ length: 8 }).map((_, i) => `<g transform="translate(${25 + (i * 52) % 200} ${32 + (i * 41) % 110})"><circle r="8" fill="#51311d"/>${Array.from({ length: 10 }).map((__, j) => `<ellipse cx="${Math.cos((j/10)*6.28)*18}" cy="${Math.sin((j/10)*6.28)*18}" rx="6" ry="12" fill="#d8a017" transform="rotate(${j*36})"/>`).join("")}</g>`).join("")}`),
+    },
+    {
+      id: "serape-stripes",
+      name: "Serape Stripes",
+      dataUrl: makePatternSvg("SERAPE", `<rect width="220" height="160" fill="#c73e2d"/><rect x="20" width="18" height="160" fill="#f6c445"/><rect x="48" width="12" height="160" fill="#2d7f74"/><rect x="78" width="28" height="160" fill="#101828"/><rect x="126" width="16" height="160" fill="#fff0c6"/><rect x="158" width="26" height="160" fill="#cf6b2e"/><rect x="196" width="10" height="160" fill="#2d4f3f"/>`),
+    },
+  ];
+}
+
+function buildPatternSvg(params: {
+  slogan: string;
+  pattern: PatternPreset;
+  settings: PatternSettings;
+  customFonts: CustomFont[];
+}) {
+  const textValue = applyTransform(params.slogan, params.settings.transform);
+  const tile = Math.max(120, 900 - params.settings.patternScale * 2.3);
+  const customStyle = fontFaceStyles(params.customFonts);
+  const baseTextAttrs = `font-family="${escapeXml(params.settings.fontFamily)}" font-size="${params.settings.fontSize}" font-weight="900" letter-spacing="${params.settings.letterSpacing}" fill="url(#texture)" stroke="${params.settings.outlineColor}" stroke-width="${params.settings.outlineWidth}" stroke-linejoin="round" paint-order="stroke fill"`;
+  const safeText = escapeXml(textValue);
+  const defs = `<defs><style>${customStyle}</style><pattern id="texture" patternUnits="userSpaceOnUse" width="${tile}" height="${tile}" patternTransform="translate(${params.settings.patternOffsetX} ${params.settings.patternOffsetY})"><image href="${params.pattern.dataUrl}" width="${tile}" height="${tile}" preserveAspectRatio="xMidYMid slice"/></pattern>${pathForEffect(params.settings.effect, params.settings.curveIntensity, 2600, "patternPath")}</defs>`;
+  const textNode = params.settings.effect === "straight"
+    ? `<text x="${WIDTH / 2}" y="${HEIGHT / 2}" text-anchor="middle" dominant-baseline="middle" ${baseTextAttrs}>${safeText}</text>`
+    : `<text ${baseTextAttrs}><textPath href="#patternPath" startOffset="50%" text-anchor="middle">${safeText}</textPath></text>`;
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}">
+    ${defs}
+    <rect width="100%" height="100%" fill="transparent"/>
+    ${textNode}
+  </svg>`;
+}
+
+async function fileToDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+async function svgToPngBlob(svg: string): Promise<Blob> {
+  await document.fonts.ready;
+  const image = new Image();
+  image.decoding = "async";
+  const dataUrl = svgDataUrl(svg);
+  await new Promise<void>((resolve, reject) => {
+    image.onload = () => resolve();
+    image.onerror = () => reject(new Error("Failed to load SVG for export."));
+    image.src = dataUrl;
+  });
+  const canvas = document.createElement("canvas");
+  canvas.width = WIDTH;
+  canvas.height = HEIGHT;
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("Canvas is not supported by this browser.");
+  context.clearRect(0, 0, WIDTH, HEIGHT);
+  context.drawImage(image, 0, 0, WIDTH, HEIGHT);
+  return await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) resolve(blob);
+      else reject(new Error("Could not export PNG."));
+    }, "image/png");
+  });
+}
+
+function loadImage(src: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.crossOrigin = "anonymous";
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error(`Failed to load image: ${src}`));
+    image.src = src;
+  });
+}
+
+async function composeMockupPngBlob(svg: string, mockup: MockupPreset) {
+  if (mockup.id === "none") throw new Error("Select a mockup preset before exporting showcase mockup.");
+  const [designBlob, mockupImage] = await Promise.all([svgToPngBlob(svg), loadImage(mockup.basePngPath)]);
+  const designUrl = URL.createObjectURL(designBlob);
+  try {
+    const designImage = await loadImage(designUrl);
+    const canvas = document.createElement("canvas");
+    canvas.width = mockupImage.naturalWidth || WIDTH;
+    canvas.height = mockupImage.naturalHeight || HEIGHT;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Could not compose mockup export.");
+    context.drawImage(mockupImage, 0, 0, canvas.width, canvas.height);
+    context.drawImage(designImage, mockup.printArea.x, mockup.printArea.y, mockup.printArea.w, mockup.printArea.h);
+    return await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob((blob) => {
+        if (blob) resolve(blob);
+        else reject(new Error("Could not export mockup PNG."));
+      }, "image/png");
+    });
+  } finally {
+    URL.revokeObjectURL(designUrl);
+  }
+}
+
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
+function getBackgroundClass(preview: PreviewBackground) {
+  if (preview === "transparent") return styles.checker;
+  return "";
+}
+
+function getBackgroundStyle(preview: PreviewBackground) {
+  const map: Record<PreviewBackground, string> = {
+    transparent: "transparent",
+    white: "#ffffff",
+    black: "#111111",
+    brown: "#5C3B28",
+    cream: "#F5E6D3",
+    forest: "#2D4F3F",
+  };
+  return preview === "transparent" ? {} : { background: map[preview] };
+}
 
 export default function PODDesignSuite() {
   const [tab, setTab] = useState<ToolTab>("graphic");
@@ -64,6 +668,20 @@ export default function PODDesignSuite() {
   const [patternDesigns, setPatternDesigns] = useState<GeneratedDesign[]>([]);
   const [selectedPreview, setSelectedPreview] = useState<GeneratedDesign | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [zipProgress, setZipProgress] = useState<ZipProgress>({
+    active: false,
+    cancelled: false,
+    processed: 0,
+    total: 0,
+    ok: 0,
+    error: 0,
+    report: [],
+  });
+  
+  const zipCancelRef = useRef(false);
+  const [stylePresets, setStylePresets] = useState<StylePreset[]>([]);
+  const [presetName, setPresetName] = useState("");
+  const [activeMockupPresetId, setActiveMockupPresetId] = useState(MOCKUP_PRESETS[0].id);
   const fontInputRef = useRef<HTMLInputElement | null>(null);
 
   const checkerStyles = { checker: styles.checker };
@@ -126,35 +744,64 @@ export default function PODDesignSuite() {
 
   function generateTemplateDesigns() {
     setError(null);
-    const values = parseLines(templateValues);
-    if (!template.trim()) return setError("Template is required.");
-    if (!values.length) return setError("Add at least one value.");
-    const placeholderMatches = Array.from(template.matchAll(/\{([^}]+)\}/g)).map((match) => match[1]);
-    if (!placeholderMatches.length) return setError("Template must include at least one {placeholder}.");
+    try {
+      const parsed = parseTemplateInput(template, templateValues);
+      const designs = parsed.rows.map((row, index) => {
+        let finalText = template;
+        if (parsed.placeholders.length === 1) {
+          finalText = template.replaceAll(`{${parsed.placeholders[0]}}`, row.values[0] || "");
+        } else {
+          parsed.placeholders.forEach((placeholder, placeholderIndex) => {
+            finalText = finalText.replaceAll(`{${placeholder}}`, row.values[placeholderIndex] || placeholder);
+          });
+        }
+        const transformed = applyTransform(finalText, textSettings.transform);
+        const lines = splitText(transformed, textSettings.lineBreakMode);
+        const svg = lineTextSvg(lines, textSettings, customFonts);
+        return {
+          id: `template-${index}`,
+          label: finalText,
+          filename: `${slugify(template)}-${slugify(row.values.join("-"))}.png`,
+          svg,
+        };
+      });
+      setTemplateDesigns(designs);
+    } catch (parseError) {
+      setError((parseError as Error).message);
+    }
+    
+    const placeholderResult = parseTemplatePlaceholders(template);
+    
+    if ("error" in placeholderResult) return setError(placeholderResult.error);
 
-    const designs = values.map((rawValue, index) => {
-      let finalText = template;
-      if (placeholderMatches.length === 1) {
-        finalText = template.replaceAll(`{${placeholderMatches[0]}}`, rawValue);
-      } else {
-        const rows = templateValues.split(/\r?\n/g).filter(Boolean);
-        const headers = rows[0]?.split(",").map((header) => header.trim()) || [];
-        const data = rows[index + 1]?.split(",").map((cell) => cell.trim()) || rawValue.split(",").map((cell) => cell.trim());
-        placeholderMatches.forEach((placeholder) => {
-          const dataIndex = headers.indexOf(placeholder);
-          finalText = finalText.replaceAll(`{${placeholder}}`, data[dataIndex] || data[0] || placeholder);
-        });
+    const normalizedTemplate = template.trim();
+    const parsedEntries = placeholderResult.mode === "single-placeholder-list"
+      ? parseSimpleList(templateValues, placeholderResult.placeholders[0])
+      : parseCsvByHeaders(templateValues, placeholderResult.placeholders);
+
+    if ("error" in parsedEntries) return setError(parsedEntries.error);
+
+    const designs: GeneratedDesign[] = [];
+    for (const [index, entry] of parsedEntries.entries()) {
+      let finalText = normalizedTemplate;
+      for (const placeholder of placeholderResult.placeholders) {
+        finalText = finalText.replaceAll(`{${placeholder}}`, entry.replacements[placeholder]);
       }
-      const transformed = applyTransform(finalText, textSettings.transform);
+
+      const normalizedText = finalText.replace(/\s+/g, " ").trim();
+      if (!normalizedText) return setError(`Generated text is empty at row ${index + 1}.`);
+
+      const transformed = applyTransform(normalizedText, textSettings.transform);
       const lines = splitText(transformed, textSettings.lineBreakMode);
       const svg = lineTextSvg(lines, textSettings, customFonts);
-      return {
+      designs.push({
         id: `template-${index}`,
-        label: finalText,
-        filename: `${slugify(template)}-${slugify(rawValue)}.png`,
+        label: normalizedText,
+        filename: `${slugify(normalizedTemplate)}-${slugify(entry.rawValue)}.png`,
         svg,
-      };
-    });
+      });
+    }
+
     setTemplateDesigns(designs);
   }
 
@@ -195,17 +842,45 @@ export default function PODDesignSuite() {
 
   async function downloadZip(designs: GeneratedDesign[], filename: string) {
     if (!designs.length) return;
+    zipCancelRef.current = false;
+    setZipProgress({ active: true, cancelled: false, processed: 0, total: designs.length, ok: 0, error: 0, report: [] });
     try {
       const JSZip = (await import("jszip")).default;
       const zip = new JSZip();
-      for (const design of designs) {
-        const blob = await svgToPngBlob(design.svg);
-        zip.file(design.filename, blob);
+      const chunkSize = 6;
+      let processed = 0;
+      let ok = 0;
+      let errorCount = 0;
+      const report: ZipProgress["report"] = [];
+      for (let start = 0; start < designs.length; start += chunkSize) {
+        if (zipCancelRef.current) {
+          setZipProgress((current) => ({ ...current, active: false, cancelled: true, processed, ok, error: errorCount, report: [...report] }));
+          return;
+        }
+        const chunk = designs.slice(start, start + chunkSize);
+        await Promise.all(
+          chunk.map(async (design) => {
+            try {
+              const blob = await svgToPngBlob(design.svg);
+              zip.file(design.filename, blob);
+              ok += 1;
+              report.push({ filename: design.filename, status: "ok" });
+            } catch (chunkError) {
+              errorCount += 1;
+              report.push({ filename: design.filename, status: "error", message: (chunkError as Error).message });
+            } finally {
+              processed += 1;
+            }
+          }),
+        );
+        setZipProgress((current) => ({ ...current, processed, ok, error: errorCount, report: [...report] }));
       }
       const zipBlob = await zip.generateAsync({ type: "blob" });
       downloadBlob(zipBlob, filename);
+      setZipProgress((current) => ({ ...current, active: false, processed, ok, error: errorCount, report: [...report] }));
     } catch (zipError) {
       setError((zipError as Error).message);
+      setZipProgress((current) => ({ ...current, active: false }));
     }
   }
 
@@ -258,8 +933,58 @@ export default function PODDesignSuite() {
     downloadBlob(blob, "podforge-workspace.json");
   }
 
+  function saveStylePreset(type: StylePresetType) {
+    const trimmedName = presetName.trim() || `${type}-preset-${stylePresets.filter((preset) => preset.type === type).length + 1}`;
+    const preset: StylePreset = {
+      id: `${type}-${Date.now()}`,
+      name: trimmedName,
+      type,
+      settings: type === "text" ? { ...textSettings } : type === "graphic" ? { ...graphicSettings } : { ...patternSettings },
+      assetRef: type === "graphic" ? { kind: "image", dataUrl: graphicDataUrl } : type === "pattern" ? { kind: "tile", dataUrl: activePattern.dataUrl } : undefined,
+    };
+    setStylePresets((current) => [preset, ...current]);
+    setPresetName("");
+  }
+
+  function duplicateStylePreset(presetId: string) {
+    const preset = stylePresets.find((entry) => entry.id === presetId);
+    if (!preset) return;
+    setStylePresets((current) => [{ ...preset, id: `${preset.type}-${Date.now()}`, name: `${preset.name} copy` }, ...current]);
+  }
+
+  function applyStylePreset(preset: StylePreset) {
+    if (preset.type === "text") setTextSettings({ ...(preset.settings as TextSettings) });
+    if (preset.type === "graphic") {
+      setGraphicSettings({ ...(preset.settings as GraphicSettings) });
+      if (preset.assetRef?.kind === "image") setGraphicDataUrl(preset.assetRef.dataUrl);
+    }
+    if (preset.type === "pattern") {
+      setPatternSettings({ ...(preset.settings as PatternSettings) });
+      if (preset.assetRef?.kind === "tile") {
+        const existing = patterns.find((pattern) => pattern.dataUrl === preset.assetRef?.dataUrl);
+        if (existing) {
+          setActivePatternId(existing.id);
+        } else {
+          const id = `preset-tile-${Date.now()}`;
+          setCustomPatterns((current) => [...current, { id, name: `${preset.name} tile`, dataUrl: preset.assetRef!.dataUrl }]);
+          setActivePatternId(id);
+        }
+      }
+    }
+  }
+
   const currentDesigns = tab === "templates" ? templateDesigns : tab === "graphic" ? graphicDesigns : patternDesigns;
   const currentPreviewBackground = tab === "pattern" ? patternPreviewBackground : previewBackground;
+  const activeMockupPreset = MOCKUP_PRESETS.find((preset) => preset.id === activeMockupPresetId) || MOCKUP_PRESETS[0];
+
+  async function downloadMockupDesign(design: GeneratedDesign) {
+    try {
+      const blob = await composeMockupPngBlob(design.svg, activeMockupPreset);
+      downloadBlob(blob, design.filename.replace(/\.png$/i, "-mockup.png"));
+    } catch (downloadError) {
+      setError((downloadError as Error).message);
+    }
+  }
 
   return (
     <section className={styles.appShell}>
@@ -306,6 +1031,7 @@ export default function PODDesignSuite() {
                 templateValues={templateValues}
                 setTemplateValues={setTemplateValues}
                 generate={generateTemplateDesigns}
+                savePreset={() => saveStylePreset("text")}
               />
               <TemplateControls
                 settings={textSettings}
@@ -330,6 +1056,7 @@ export default function PODDesignSuite() {
                 setSettings={setGraphicSettings}
                 generate={generateGraphicDesigns}
                 openFontImport={() => fontInputRef.current?.click()}
+                savePreset={() => saveStylePreset("graphic")}
               />
               <GraphicControls
                 settings={graphicSettings}
@@ -355,6 +1082,7 @@ export default function PODDesignSuite() {
                 setSettings={setPatternSettings}
                 generate={generatePatternDesigns}
                 handlePatternUpload={handlePatternUpload}
+                savePreset={() => saveStylePreset("pattern")}
               />
               <PatternControls
                 settings={patternSettings}
@@ -372,8 +1100,16 @@ export default function PODDesignSuite() {
             designs={currentDesigns}
             background={currentPreviewBackground}
             onDownload={downloadDesign}
+            onDownloadMockup={downloadMockupDesign}
             onDownloadZip={() => downloadZip(currentDesigns, `${tab}-designs.zip`)}
             onPreview={setSelectedPreview}
+            zipProgress={zipProgress}
+            onCancelZip={() => {
+              zipCancelRef.current = true;
+            }}
+            mockupPresets={MOCKUP_PRESETS}
+            activeMockupPresetId={activeMockupPresetId}
+            setActiveMockupPresetId={setActiveMockupPresetId}
           />
         </div>
       ) : (
@@ -382,6 +1118,12 @@ export default function PODDesignSuite() {
           removeFont={(fontName) => setCustomFonts((fonts) => fonts.filter((font) => font.name !== fontName))}
           importFonts={() => fontInputRef.current?.click()}
           exportWorkspace={exportWorkspace}
+          stylePresets={stylePresets}
+          presetName={presetName}
+          setPresetName={setPresetName}
+          applyStylePreset={applyStylePreset}
+          duplicateStylePreset={duplicateStylePreset}
+          activeTab={tab}
         />
       )}
 
@@ -412,6 +1154,7 @@ function TemplateInputPanel(props: {
   templateValues: string;
   setTemplateValues: (value: string) => void;
   generate: () => void;
+  savePreset: () => void;
 }) {
   return (
     <aside className={styles.panel}>
@@ -427,7 +1170,7 @@ function TemplateInputPanel(props: {
       <label className={styles.label}>Bulk values</label>
       <textarea className={styles.textarea} value={props.templateValues} onChange={(event) => props.setTemplateValues(event.target.value)} />
       <div className={styles.row}>
-        <button className={styles.secondaryButton}>♡ Save Template</button>
+        <button className={styles.secondaryButton} onClick={props.savePreset}>♡ Save StylePreset</button>
         <button className={styles.primaryButton} onClick={props.generate}>✦ Generate</button>
       </div>
     </aside>
@@ -482,6 +1225,7 @@ function GraphicInputPanel(props: {
   setSettings: (settings: GraphicSettings) => void;
   generate: () => void;
   openFontImport: () => void;
+  savePreset: () => void;
 }) {
   const update = (patch: Partial<GraphicSettings>) => props.setSettings({ ...props.settings, ...patch });
   return (
@@ -503,7 +1247,7 @@ function GraphicInputPanel(props: {
       <input className={styles.input} value={props.settings.subText} onChange={(event) => update({ subText: event.target.value })} />
       <div className={styles.warningInline} style={{ margin: "14px 0" }}>Custom fonts and uploaded graphics are temporary browser memory only.</div>
       <div className={styles.row}>
-        <button className={styles.secondaryButton}>♡ Save as Preset</button>
+        <button className={styles.secondaryButton} onClick={props.savePreset}>♡ Save StylePreset</button>
         <button className={styles.smallButton} onClick={props.openFontImport}>Aa Import Fonts</button>
         <button className={styles.primaryButton} onClick={props.generate}>✦ Generate</button>
       </div>
@@ -581,6 +1325,7 @@ function PatternInputPanel(props: {
   setSettings: (settings: PatternSettings) => void;
   generate: () => void;
   handlePatternUpload: (event: ChangeEvent<HTMLInputElement>) => void;
+  savePreset: () => void;
 }) {
   const update = (patch: Partial<PatternSettings>) => props.setSettings({ ...props.settings, ...patch });
   return (
@@ -600,7 +1345,10 @@ function PatternInputPanel(props: {
       <Range label="Pattern Offset Y" value={props.settings.patternOffsetY} min={-600} max={600} step={10} onChange={(patternOffsetY) => update({ patternOffsetY })} suffix="" />
       <label className={styles.label}>Bulk Slogans</label>
       <textarea className={styles.textarea} value={props.slogans} onChange={(event) => props.setSlogans(event.target.value)} />
-      <button className={styles.primaryButton} onClick={props.generate}>✦ Generate</button>
+      <div className={styles.row}>
+        <button className={styles.secondaryButton} onClick={props.savePreset}>♡ Save StylePreset</button>
+        <button className={styles.primaryButton} onClick={props.generate}>✦ Generate</button>
+      </div>
     </aside>
   );
 }
@@ -647,14 +1395,52 @@ function PreviewPanel(props: {
   designs: GeneratedDesign[];
   background: PreviewBackground;
   onDownload: (design: GeneratedDesign) => void;
+  onDownloadMockup: (design: GeneratedDesign) => void;
   onDownloadZip: () => void;
   onPreview: (design: GeneratedDesign) => void;
+  zipProgress: ZipProgress;
+  onCancelZip: () => void;
+  mockupPresets: MockupPreset[];
+  activeMockupPresetId: string;
+  setActiveMockupPresetId: (value: string) => void;
 }) {
+  const selectedMockup = props.mockupPresets.find((preset) => preset.id === props.activeMockupPresetId) || props.mockupPresets[0];
   return (
     <section className={styles.panel}>
       <div className={styles.previewHeader}>
         <h2 className={styles.panelTitle}>Preview Grid</h2>
         <button className={styles.primaryButton} disabled={!props.designs.length} onClick={props.onDownloadZip}>↓ Download All ZIP</button>
+      </div>
+      {props.zipProgress.total > 0 && (
+        <div className={styles.zipStatus}>
+          <p>
+            ZIP progress: {props.zipProgress.processed}/{props.zipProgress.total} · ok {props.zipProgress.ok} · erro {props.zipProgress.error}
+            {props.zipProgress.cancelled ? " · cancelled" : ""}
+          </p>
+          {props.zipProgress.active && <button className={styles.smallButton} onClick={props.onCancelZip}>Cancel ZIP</button>}
+          {!!props.zipProgress.report.length && (
+            <details>
+              <summary>Export report (ok/error by file)</summary>
+              <ul>
+                {props.zipProgress.report.map((item) => (
+                  <li key={`${item.filename}-${item.status}`}>
+                    {item.filename}: {item.status}{item.message ? ` (${item.message})` : ""}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+        </div>
+      )}
+      <div className={styles.controlGroup}>
+        <h3>Showcase Mockup (Optional)</h3>
+        <label className={styles.label}>Base PNG from forge/mockups</label>
+        <select className={styles.select} value={props.activeMockupPresetId} onChange={(event) => props.setActiveMockupPresetId(event.target.value)}>
+          {props.mockupPresets.map((preset) => (
+            <option key={preset.id} value={preset.id}>{preset.name}</option>
+          ))}
+        </select>
+        {selectedMockup.id !== "none" && <p className={styles.helpText}>Area: x {selectedMockup.printArea.x}, y {selectedMockup.printArea.y}, w {selectedMockup.printArea.w}, h {selectedMockup.printArea.h}</p>}
       </div>
       {!props.designs.length ? (
         <div className={styles.warningInline}>Generate designs to see previews here.</div>
@@ -671,6 +1457,7 @@ function PreviewPanel(props: {
               />
               <div className={styles.cardActions}>
                 <button className={styles.smallButton} onClick={() => props.onDownload(design)}>↓ Download PNG</button>
+                <button className={styles.smallButton} disabled={props.activeMockupPresetId === "none"} onClick={() => props.onDownloadMockup(design)}>↓ Download Mockup</button>
                 <span className={styles.cardMeta}>4500×5400 px<br />transparent</span>
               </div>
             </article>
@@ -686,6 +1473,12 @@ function InfoPanel(props: {
   removeFont: (fontName: string) => void;
   importFonts: () => void;
   exportWorkspace: () => void;
+  stylePresets: StylePreset[];
+  presetName: string;
+  setPresetName: (value: string) => void;
+  applyStylePreset: (preset: StylePreset) => void;
+  duplicateStylePreset: (presetId: string) => void;
+  activeTab: ToolTab;
 }) {
   return (
     <section className={styles.infoGrid}>
@@ -717,6 +1510,27 @@ function InfoPanel(props: {
           </div>
         )}
         <p className={styles.helpText}>Supported: .ttf, .otf, .woff, .woff2. Imported fonts are session-only.</p>
+      </div>
+      <div className={styles.infoCard}>
+        <h3>StylePreset Entity</h3>
+        <p>Save a reusable visual style (type + complete settings + image/tile reference when applicable), duplicate it, and apply it for batch generation.</p>
+        <label className={styles.label}>Preset name</label>
+        <input className={styles.input} value={props.presetName} onChange={(event) => props.setPresetName(event.target.value)} placeholder="Ex: western-vintage-v1" />
+        {!props.stylePresets.length ? (
+          <p>No StylePreset saved yet. Save from Text, Graphic, or Pattern tabs.</p>
+        ) : (
+          <div className={styles.chipList}>
+            {props.stylePresets.map((preset) => (
+              <div key={preset.id} className={styles.row}>
+                <button className={styles.chip} onClick={() => props.applyStylePreset(preset)}>
+                  {preset.name} [{preset.type}]
+                </button>
+                <button className={styles.smallButton} onClick={() => props.duplicateStylePreset(preset.id)}>Duplicate</button>
+              </div>
+            ))}
+          </div>
+        )}
+        <p className={styles.helpText}>Apply a preset, go to the matching tab, edit the phrase list and click Generate to create N designs with the same visual style.</p>
       </div>
       <div className={styles.infoCard}>
         <h3>Usage Tips</h3>

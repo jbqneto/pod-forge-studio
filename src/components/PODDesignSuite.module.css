@@ -317,6 +317,14 @@
   gap: 18px;
 }
 
+.zipStatus {
+  border: 2px solid var(--ink);
+  border-radius: 6px;
+  background: #fffef9;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+
 .previewCard {
   border: 3px solid var(--ink);
   border-radius: 8px;
