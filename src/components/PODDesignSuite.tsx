@@ -4,6 +4,7 @@ import { ChangeEvent, useMemo, useRef, useState } from "react";
 import { parseCsvByHeaders, parseSimpleList } from "../lib/design/csvParser";
 import { parseTemplatePlaceholders } from "../lib/design/placeholderParser";
 import styles from "./PODDesignSuite.module.css";
+import { parseTemplateInput } from "@/lib/templateParser";
 
 type ToolTab = "templates" | "graphic" | "pattern" | "info";
 type Align = "left" | "center" | "right";
@@ -24,6 +25,17 @@ type GeneratedDesign = {
   filename: string;
   svg: string;
 };
+
+type ZipProgress = {
+  active: boolean;
+  cancelled: boolean;
+  processed: number;
+  total: number;
+  ok: number;
+  error: number;
+  report: { filename: string; status: "ok" | "error"; message?: string }[];
+}
+
 type MockupPreset = {
   id: string;
   name: string;
@@ -614,6 +626,17 @@ export default function PODDesignSuite() {
   const [patternDesigns, setPatternDesigns] = useState<GeneratedDesign[]>([]);
   const [selectedPreview, setSelectedPreview] = useState<GeneratedDesign | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [zipProgress, setZipProgress] = useState<ZipProgress>({
+    active: false,
+    cancelled: false,
+    processed: 0,
+    total: 0,
+    ok: 0,
+    error: 0,
+    report: [],
+  });
+  
+  const zipCancelRef = useRef(false);
   const [stylePresets, setStylePresets] = useState<StylePreset[]>([]);
   const [presetName, setPresetName] = useState("");
   const [activeMockupPresetId, setActiveMockupPresetId] = useState(MOCKUP_PRESETS[0].id);
@@ -677,7 +700,34 @@ export default function PODDesignSuite() {
 
   function generateTemplateDesigns() {
     setError(null);
+    try {
+      const parsed = parseTemplateInput(template, templateValues);
+      const designs = parsed.rows.map((row, index) => {
+        let finalText = template;
+        if (parsed.placeholders.length === 1) {
+          finalText = template.replaceAll(`{${parsed.placeholders[0]}}`, row.values[0] || "");
+        } else {
+          parsed.placeholders.forEach((placeholder, placeholderIndex) => {
+            finalText = finalText.replaceAll(`{${placeholder}}`, row.values[placeholderIndex] || placeholder);
+          });
+        }
+        const transformed = applyTransform(finalText, textSettings.transform);
+        const lines = splitText(transformed, textSettings.lineBreakMode);
+        const svg = lineTextSvg(lines, textSettings, customFonts);
+        return {
+          id: `template-${index}`,
+          label: finalText,
+          filename: `${slugify(template)}-${slugify(row.values.join("-"))}.png`,
+          svg,
+        };
+      });
+      setTemplateDesigns(designs);
+    } catch (parseError) {
+      setError((parseError as Error).message);
+    }
+    
     const placeholderResult = parseTemplatePlaceholders(template);
+    
     if ("error" in placeholderResult) return setError(placeholderResult.error);
 
     const normalizedTemplate = template.trim();
@@ -748,17 +798,45 @@ export default function PODDesignSuite() {
 
   async function downloadZip(designs: GeneratedDesign[], filename: string) {
     if (!designs.length) return;
+    zipCancelRef.current = false;
+    setZipProgress({ active: true, cancelled: false, processed: 0, total: designs.length, ok: 0, error: 0, report: [] });
     try {
       const JSZip = (await import("jszip")).default;
       const zip = new JSZip();
-      for (const design of designs) {
-        const blob = await svgToPngBlob(design.svg);
-        zip.file(design.filename, blob);
+      const chunkSize = 6;
+      let processed = 0;
+      let ok = 0;
+      let errorCount = 0;
+      const report: ZipProgress["report"] = [];
+      for (let start = 0; start < designs.length; start += chunkSize) {
+        if (zipCancelRef.current) {
+          setZipProgress((current) => ({ ...current, active: false, cancelled: true, processed, ok, error: errorCount, report: [...report] }));
+          return;
+        }
+        const chunk = designs.slice(start, start + chunkSize);
+        await Promise.all(
+          chunk.map(async (design) => {
+            try {
+              const blob = await svgToPngBlob(design.svg);
+              zip.file(design.filename, blob);
+              ok += 1;
+              report.push({ filename: design.filename, status: "ok" });
+            } catch (chunkError) {
+              errorCount += 1;
+              report.push({ filename: design.filename, status: "error", message: (chunkError as Error).message });
+            } finally {
+              processed += 1;
+            }
+          }),
+        );
+        setZipProgress((current) => ({ ...current, processed, ok, error: errorCount, report: [...report] }));
       }
       const zipBlob = await zip.generateAsync({ type: "blob" });
       downloadBlob(zipBlob, filename);
+      setZipProgress((current) => ({ ...current, active: false, processed, ok, error: errorCount, report: [...report] }));
     } catch (zipError) {
       setError((zipError as Error).message);
+      setZipProgress((current) => ({ ...current, active: false }));
     }
   }
 
@@ -981,6 +1059,10 @@ export default function PODDesignSuite() {
             onDownloadMockup={downloadMockupDesign}
             onDownloadZip={() => downloadZip(currentDesigns, `${tab}-designs.zip`)}
             onPreview={setSelectedPreview}
+            zipProgress={zipProgress}
+            onCancelZip={() => {
+              zipCancelRef.current = true;
+            }}
             mockupPresets={MOCKUP_PRESETS}
             activeMockupPresetId={activeMockupPresetId}
             setActiveMockupPresetId={setActiveMockupPresetId}
@@ -1272,6 +1354,8 @@ function PreviewPanel(props: {
   onDownloadMockup: (design: GeneratedDesign) => void;
   onDownloadZip: () => void;
   onPreview: (design: GeneratedDesign) => void;
+  zipProgress: ZipProgress;
+  onCancelZip: () => void;
   mockupPresets: MockupPreset[];
   activeMockupPresetId: string;
   setActiveMockupPresetId: (value: string) => void;
@@ -1283,6 +1367,27 @@ function PreviewPanel(props: {
         <h2 className={styles.panelTitle}>Preview Grid</h2>
         <button className={styles.primaryButton} disabled={!props.designs.length} onClick={props.onDownloadZip}>↓ Download All ZIP</button>
       </div>
+      {props.zipProgress.total > 0 && (
+        <div className={styles.zipStatus}>
+          <p>
+            ZIP progress: {props.zipProgress.processed}/{props.zipProgress.total} · ok {props.zipProgress.ok} · erro {props.zipProgress.error}
+            {props.zipProgress.cancelled ? " · cancelled" : ""}
+          </p>
+          {props.zipProgress.active && <button className={styles.smallButton} onClick={props.onCancelZip}>Cancel ZIP</button>}
+          {!!props.zipProgress.report.length && (
+            <details>
+              <summary>Export report (ok/error by file)</summary>
+              <ul>
+                {props.zipProgress.report.map((item) => (
+                  <li key={`${item.filename}-${item.status}`}>
+                    {item.filename}: {item.status}{item.message ? ` (${item.message})` : ""}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+        </div>
+      )}
       <div className={styles.controlGroup}>
         <h3>Showcase Mockup (Optional)</h3>
         <label className={styles.label}>Base PNG from forge/mockups</label>
