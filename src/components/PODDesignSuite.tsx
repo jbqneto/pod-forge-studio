@@ -1,6 +1,48 @@
 "use client";
 
 import { ChangeEvent, useMemo, useRef, useState } from "react";
+import {
+  type Align,
+  BASE_FONTS,
+  COLOR_PRESETS,
+  HEIGHT,
+  HEAVY_FONTS,
+  OUTLINE_PRESETS,
+  PATTERN_SLOGANS,
+  SLOGAN_EXAMPLES,
+  TEMPLATE_EXAMPLES,
+  WIDTH,
+  applyTransform,
+  buildGraphicSvg,
+  buildPatternSvg,
+  defaultGraphicSettings,
+  defaultPatternSettings,
+  defaultTextSettings,
+  downloadBlob,
+  fileToDataUrl,
+  formatFromMime,
+  getBackgroundClass,
+  getBackgroundStyle,
+  getPatternPresets,
+  lineTextSvg,
+  parseLines,
+  placeholderGraphic,
+  slugify,
+  splitText,
+  svgDataUrl,
+  svgToPngBlob,
+  type CustomFont,
+  type FontSource,
+  type GeneratedDesign,
+  type GraphicSettings,
+  type PatternPreset,
+  type PatternSettings,
+  type PreviewBackground,
+  type ToolTab,
+  type TextEffect,
+  type TextSettings,
+  type Transform,
+} from "@/lib/podforge";
 import { parseCsvByHeaders, parseSimpleList } from "../lib/design/csvParser";
 import { parseTemplatePlaceholders } from "../lib/design/placeholderParser";
 import styles from "./PODDesignSuite.module.css";
@@ -642,6 +684,8 @@ export default function PODDesignSuite() {
   const [activeMockupPresetId, setActiveMockupPresetId] = useState(MOCKUP_PRESETS[0].id);
   const fontInputRef = useRef<HTMLInputElement | null>(null);
 
+  const checkerStyles = { checker: styles.checker };
+
   const basePatterns = useMemo(() => getPatternPresets(), []);
   const patterns = useMemo(() => [...basePatterns, ...customPatterns], [basePatterns, customPatterns]);
   const [activePatternId, setActivePatternId] = useState("realtree-camo");
@@ -1096,7 +1140,7 @@ export default function PODDesignSuite() {
             <div className={styles.modalActions}>
               <button className={styles.secondaryButton} onClick={() => setSelectedPreview(null)}>Close</button>
             </div>
-            <div className={`${styles.designSurface} ${getBackgroundClass(currentPreviewBackground)}`} style={getBackgroundStyle(currentPreviewBackground)} dangerouslySetInnerHTML={{ __html: selectedPreview.svg }} />
+            <div className={`${styles.designSurface} ${getBackgroundClass(currentPreviewBackground, checkerStyles)}`} style={getBackgroundStyle(currentPreviewBackground)} dangerouslySetInnerHTML={{ __html: selectedPreview.svg }} />
           </div>
         </div>
       )}
@@ -1406,7 +1450,7 @@ function PreviewPanel(props: {
             <article key={design.id} className={styles.previewCard}>
               <button
                 aria-label={`Open enlarged preview for ${design.label}`}
-                className={`${styles.designSurface} ${getBackgroundClass(props.background)}`}
+                className={`${styles.designSurface} ${getBackgroundClass(props.background, { checker: styles.checker })}`}
                 style={getBackgroundStyle(props.background)}
                 onClick={() => props.onPreview(design)}
                 dangerouslySetInnerHTML={{ __html: design.svg }}
