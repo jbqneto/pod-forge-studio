@@ -1,6 +1,8 @@
 "use client";
 
 import { ChangeEvent, useMemo, useRef, useState } from "react";
+import { parseCsvByHeaders, parseSimpleList } from "../lib/design/csvParser";
+import { parseTemplatePlaceholders } from "../lib/design/placeholderParser";
 import styles from "./PODDesignSuite.module.css";
 
 type ToolTab = "templates" | "graphic" | "pattern" | "info";
@@ -21,6 +23,12 @@ type GeneratedDesign = {
   label: string;
   filename: string;
   svg: string;
+};
+type MockupPreset = {
+  id: string;
+  name: string;
+  basePngPath: string;
+  printArea: { x: number; y: number; w: number; h: number };
 };
 
 type TextSettings = {
@@ -91,6 +99,11 @@ type StylePreset = {
 
 const WIDTH = 4500;
 const HEIGHT = 5400;
+const MOCKUP_PRESETS: MockupPreset[] = [
+  { id: "none", name: "No mockup", basePngPath: "", printArea: { x: 0, y: 0, w: 0, h: 0 } },
+  { id: "tee-front-classic", name: "Classic Tee Front", basePngPath: "/forge/mockups/tee-front-classic.png", printArea: { x: 1320, y: 1290, w: 1860, h: 2232 } },
+  { id: "hoodie-front-classic", name: "Classic Hoodie Front", basePngPath: "/forge/mockups/hoodie-front-classic.png", printArea: { x: 1410, y: 1450, w: 1680, h: 2016 } },
+];
 
 const BASE_FONTS = [
   "Bebas Neue",
@@ -520,6 +533,40 @@ async function svgToPngBlob(svg: string): Promise<Blob> {
   });
 }
 
+function loadImage(src: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.crossOrigin = "anonymous";
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error(`Failed to load image: ${src}`));
+    image.src = src;
+  });
+}
+
+async function composeMockupPngBlob(svg: string, mockup: MockupPreset) {
+  if (mockup.id === "none") throw new Error("Select a mockup preset before exporting showcase mockup.");
+  const [designBlob, mockupImage] = await Promise.all([svgToPngBlob(svg), loadImage(mockup.basePngPath)]);
+  const designUrl = URL.createObjectURL(designBlob);
+  try {
+    const designImage = await loadImage(designUrl);
+    const canvas = document.createElement("canvas");
+    canvas.width = mockupImage.naturalWidth || WIDTH;
+    canvas.height = mockupImage.naturalHeight || HEIGHT;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Could not compose mockup export.");
+    context.drawImage(mockupImage, 0, 0, canvas.width, canvas.height);
+    context.drawImage(designImage, mockup.printArea.x, mockup.printArea.y, mockup.printArea.w, mockup.printArea.h);
+    return await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob((blob) => {
+        if (blob) resolve(blob);
+        else reject(new Error("Could not export mockup PNG."));
+      }, "image/png");
+    });
+  } finally {
+    URL.revokeObjectURL(designUrl);
+  }
+}
+
 function downloadBlob(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
@@ -569,6 +616,7 @@ export default function PODDesignSuite() {
   const [error, setError] = useState<string | null>(null);
   const [stylePresets, setStylePresets] = useState<StylePreset[]>([]);
   const [presetName, setPresetName] = useState("");
+  const [activeMockupPresetId, setActiveMockupPresetId] = useState(MOCKUP_PRESETS[0].id);
   const fontInputRef = useRef<HTMLInputElement | null>(null);
 
   const basePatterns = useMemo(() => getPatternPresets(), []);
@@ -629,35 +677,37 @@ export default function PODDesignSuite() {
 
   function generateTemplateDesigns() {
     setError(null);
-    const values = parseLines(templateValues);
-    if (!template.trim()) return setError("Template is required.");
-    if (!values.length) return setError("Add at least one value.");
-    const placeholderMatches = Array.from(template.matchAll(/\{([^}]+)\}/g)).map((match) => match[1]);
-    if (!placeholderMatches.length) return setError("Template must include at least one {placeholder}.");
+    const placeholderResult = parseTemplatePlaceholders(template);
+    if ("error" in placeholderResult) return setError(placeholderResult.error);
 
-    const designs = values.map((rawValue, index) => {
-      let finalText = template;
-      if (placeholderMatches.length === 1) {
-        finalText = template.replaceAll(`{${placeholderMatches[0]}}`, rawValue);
-      } else {
-        const rows = templateValues.split(/\r?\n/g).filter(Boolean);
-        const headers = rows[0]?.split(",").map((header) => header.trim()) || [];
-        const data = rows[index + 1]?.split(",").map((cell) => cell.trim()) || rawValue.split(",").map((cell) => cell.trim());
-        placeholderMatches.forEach((placeholder) => {
-          const dataIndex = headers.indexOf(placeholder);
-          finalText = finalText.replaceAll(`{${placeholder}}`, data[dataIndex] || data[0] || placeholder);
-        });
+    const normalizedTemplate = template.trim();
+    const parsedEntries = placeholderResult.mode === "single-placeholder-list"
+      ? parseSimpleList(templateValues, placeholderResult.placeholders[0])
+      : parseCsvByHeaders(templateValues, placeholderResult.placeholders);
+
+    if ("error" in parsedEntries) return setError(parsedEntries.error);
+
+    const designs: GeneratedDesign[] = [];
+    for (const [index, entry] of parsedEntries.entries()) {
+      let finalText = normalizedTemplate;
+      for (const placeholder of placeholderResult.placeholders) {
+        finalText = finalText.replaceAll(`{${placeholder}}`, entry.replacements[placeholder]);
       }
-      const transformed = applyTransform(finalText, textSettings.transform);
+
+      const normalizedText = finalText.replace(/\s+/g, " ").trim();
+      if (!normalizedText) return setError(`Generated text is empty at row ${index + 1}.`);
+
+      const transformed = applyTransform(normalizedText, textSettings.transform);
       const lines = splitText(transformed, textSettings.lineBreakMode);
       const svg = lineTextSvg(lines, textSettings, customFonts);
-      return {
+      designs.push({
         id: `template-${index}`,
-        label: finalText,
-        filename: `${slugify(template)}-${slugify(rawValue)}.png`,
+        label: normalizedText,
+        filename: `${slugify(normalizedTemplate)}-${slugify(entry.rawValue)}.png`,
         svg,
-      };
-    });
+      });
+    }
+
     setTemplateDesigns(designs);
   }
 
@@ -803,6 +853,16 @@ export default function PODDesignSuite() {
 
   const currentDesigns = tab === "templates" ? templateDesigns : tab === "graphic" ? graphicDesigns : patternDesigns;
   const currentPreviewBackground = tab === "pattern" ? patternPreviewBackground : previewBackground;
+  const activeMockupPreset = MOCKUP_PRESETS.find((preset) => preset.id === activeMockupPresetId) || MOCKUP_PRESETS[0];
+
+  async function downloadMockupDesign(design: GeneratedDesign) {
+    try {
+      const blob = await composeMockupPngBlob(design.svg, activeMockupPreset);
+      downloadBlob(blob, design.filename.replace(/\.png$/i, "-mockup.png"));
+    } catch (downloadError) {
+      setError((downloadError as Error).message);
+    }
+  }
 
   return (
     <section className={styles.appShell}>
@@ -918,8 +978,12 @@ export default function PODDesignSuite() {
             designs={currentDesigns}
             background={currentPreviewBackground}
             onDownload={downloadDesign}
+            onDownloadMockup={downloadMockupDesign}
             onDownloadZip={() => downloadZip(currentDesigns, `${tab}-designs.zip`)}
             onPreview={setSelectedPreview}
+            mockupPresets={MOCKUP_PRESETS}
+            activeMockupPresetId={activeMockupPresetId}
+            setActiveMockupPresetId={setActiveMockupPresetId}
           />
         </div>
       ) : (
@@ -1205,14 +1269,29 @@ function PreviewPanel(props: {
   designs: GeneratedDesign[];
   background: PreviewBackground;
   onDownload: (design: GeneratedDesign) => void;
+  onDownloadMockup: (design: GeneratedDesign) => void;
   onDownloadZip: () => void;
   onPreview: (design: GeneratedDesign) => void;
+  mockupPresets: MockupPreset[];
+  activeMockupPresetId: string;
+  setActiveMockupPresetId: (value: string) => void;
 }) {
+  const selectedMockup = props.mockupPresets.find((preset) => preset.id === props.activeMockupPresetId) || props.mockupPresets[0];
   return (
     <section className={styles.panel}>
       <div className={styles.previewHeader}>
         <h2 className={styles.panelTitle}>Preview Grid</h2>
         <button className={styles.primaryButton} disabled={!props.designs.length} onClick={props.onDownloadZip}>↓ Download All ZIP</button>
+      </div>
+      <div className={styles.controlGroup}>
+        <h3>Showcase Mockup (Optional)</h3>
+        <label className={styles.label}>Base PNG from forge/mockups</label>
+        <select className={styles.select} value={props.activeMockupPresetId} onChange={(event) => props.setActiveMockupPresetId(event.target.value)}>
+          {props.mockupPresets.map((preset) => (
+            <option key={preset.id} value={preset.id}>{preset.name}</option>
+          ))}
+        </select>
+        {selectedMockup.id !== "none" && <p className={styles.helpText}>Area: x {selectedMockup.printArea.x}, y {selectedMockup.printArea.y}, w {selectedMockup.printArea.w}, h {selectedMockup.printArea.h}</p>}
       </div>
       {!props.designs.length ? (
         <div className={styles.warningInline}>Generate designs to see previews here.</div>
@@ -1229,6 +1308,7 @@ function PreviewPanel(props: {
               />
               <div className={styles.cardActions}>
                 <button className={styles.smallButton} onClick={() => props.onDownload(design)}>↓ Download PNG</button>
+                <button className={styles.smallButton} disabled={props.activeMockupPresetId === "none"} onClick={() => props.onDownloadMockup(design)}>↓ Download Mockup</button>
                 <span className={styles.cardMeta}>4500×5400 px<br />transparent</span>
               </div>
             </article>
