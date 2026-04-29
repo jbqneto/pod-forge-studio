@@ -1,6 +1,8 @@
 "use client";
 
 import { ChangeEvent, useMemo, useRef, useState } from "react";
+import { parseCsvByHeaders, parseSimpleList } from "../lib/design/csvParser";
+import { parseTemplatePlaceholders } from "../lib/design/placeholderParser";
 import styles from "./PODDesignSuite.module.css";
 import { parseTemplateInput } from "@/lib/templateParser";
 
@@ -23,6 +25,7 @@ type GeneratedDesign = {
   filename: string;
   svg: string;
 };
+
 type ZipProgress = {
   active: boolean;
   cancelled: boolean;
@@ -31,6 +34,13 @@ type ZipProgress = {
   ok: number;
   error: number;
   report: { filename: string; status: "ok" | "error"; message?: string }[];
+}
+
+type MockupPreset = {
+  id: string;
+  name: string;
+  basePngPath: string;
+  printArea: { x: number; y: number; w: number; h: number };
 };
 
 type TextSettings = {
@@ -87,9 +97,25 @@ type PatternPreset = {
   name: string;
   dataUrl: string;
 };
+type StylePresetType = "text" | "graphic" | "pattern";
+type StylePreset = {
+  id: string;
+  name: string;
+  type: StylePresetType;
+  settings: TextSettings | GraphicSettings | PatternSettings;
+  assetRef?: {
+    kind: "image" | "tile";
+    dataUrl: string;
+  };
+};
 
 const WIDTH = 4500;
 const HEIGHT = 5400;
+const MOCKUP_PRESETS: MockupPreset[] = [
+  { id: "none", name: "No mockup", basePngPath: "", printArea: { x: 0, y: 0, w: 0, h: 0 } },
+  { id: "tee-front-classic", name: "Classic Tee Front", basePngPath: "/forge/mockups/tee-front-classic.png", printArea: { x: 1320, y: 1290, w: 1860, h: 2232 } },
+  { id: "hoodie-front-classic", name: "Classic Hoodie Front", basePngPath: "/forge/mockups/hoodie-front-classic.png", printArea: { x: 1410, y: 1450, w: 1680, h: 2016 } },
+];
 
 const BASE_FONTS = [
   "Bebas Neue",
@@ -519,6 +545,40 @@ async function svgToPngBlob(svg: string): Promise<Blob> {
   });
 }
 
+function loadImage(src: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.crossOrigin = "anonymous";
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error(`Failed to load image: ${src}`));
+    image.src = src;
+  });
+}
+
+async function composeMockupPngBlob(svg: string, mockup: MockupPreset) {
+  if (mockup.id === "none") throw new Error("Select a mockup preset before exporting showcase mockup.");
+  const [designBlob, mockupImage] = await Promise.all([svgToPngBlob(svg), loadImage(mockup.basePngPath)]);
+  const designUrl = URL.createObjectURL(designBlob);
+  try {
+    const designImage = await loadImage(designUrl);
+    const canvas = document.createElement("canvas");
+    canvas.width = mockupImage.naturalWidth || WIDTH;
+    canvas.height = mockupImage.naturalHeight || HEIGHT;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Could not compose mockup export.");
+    context.drawImage(mockupImage, 0, 0, canvas.width, canvas.height);
+    context.drawImage(designImage, mockup.printArea.x, mockup.printArea.y, mockup.printArea.w, mockup.printArea.h);
+    return await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob((blob) => {
+        if (blob) resolve(blob);
+        else reject(new Error("Could not export mockup PNG."));
+      }, "image/png");
+    });
+  } finally {
+    URL.revokeObjectURL(designUrl);
+  }
+}
+
 function downloadBlob(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
@@ -575,7 +635,11 @@ export default function PODDesignSuite() {
     error: 0,
     report: [],
   });
+  
   const zipCancelRef = useRef(false);
+  const [stylePresets, setStylePresets] = useState<StylePreset[]>([]);
+  const [presetName, setPresetName] = useState("");
+  const [activeMockupPresetId, setActiveMockupPresetId] = useState(MOCKUP_PRESETS[0].id);
   const fontInputRef = useRef<HTMLInputElement | null>(null);
 
   const basePatterns = useMemo(() => getPatternPresets(), []);
@@ -661,6 +725,40 @@ export default function PODDesignSuite() {
     } catch (parseError) {
       setError((parseError as Error).message);
     }
+    
+    const placeholderResult = parseTemplatePlaceholders(template);
+    
+    if ("error" in placeholderResult) return setError(placeholderResult.error);
+
+    const normalizedTemplate = template.trim();
+    const parsedEntries = placeholderResult.mode === "single-placeholder-list"
+      ? parseSimpleList(templateValues, placeholderResult.placeholders[0])
+      : parseCsvByHeaders(templateValues, placeholderResult.placeholders);
+
+    if ("error" in parsedEntries) return setError(parsedEntries.error);
+
+    const designs: GeneratedDesign[] = [];
+    for (const [index, entry] of parsedEntries.entries()) {
+      let finalText = normalizedTemplate;
+      for (const placeholder of placeholderResult.placeholders) {
+        finalText = finalText.replaceAll(`{${placeholder}}`, entry.replacements[placeholder]);
+      }
+
+      const normalizedText = finalText.replace(/\s+/g, " ").trim();
+      if (!normalizedText) return setError(`Generated text is empty at row ${index + 1}.`);
+
+      const transformed = applyTransform(normalizedText, textSettings.transform);
+      const lines = splitText(transformed, textSettings.lineBreakMode);
+      const svg = lineTextSvg(lines, textSettings, customFonts);
+      designs.push({
+        id: `template-${index}`,
+        label: normalizedText,
+        filename: `${slugify(normalizedTemplate)}-${slugify(entry.rawValue)}.png`,
+        svg,
+      });
+    }
+
+    setTemplateDesigns(designs);
   }
 
   function generateGraphicDesigns() {
@@ -791,8 +889,58 @@ export default function PODDesignSuite() {
     downloadBlob(blob, "podforge-workspace.json");
   }
 
+  function saveStylePreset(type: StylePresetType) {
+    const trimmedName = presetName.trim() || `${type}-preset-${stylePresets.filter((preset) => preset.type === type).length + 1}`;
+    const preset: StylePreset = {
+      id: `${type}-${Date.now()}`,
+      name: trimmedName,
+      type,
+      settings: type === "text" ? { ...textSettings } : type === "graphic" ? { ...graphicSettings } : { ...patternSettings },
+      assetRef: type === "graphic" ? { kind: "image", dataUrl: graphicDataUrl } : type === "pattern" ? { kind: "tile", dataUrl: activePattern.dataUrl } : undefined,
+    };
+    setStylePresets((current) => [preset, ...current]);
+    setPresetName("");
+  }
+
+  function duplicateStylePreset(presetId: string) {
+    const preset = stylePresets.find((entry) => entry.id === presetId);
+    if (!preset) return;
+    setStylePresets((current) => [{ ...preset, id: `${preset.type}-${Date.now()}`, name: `${preset.name} copy` }, ...current]);
+  }
+
+  function applyStylePreset(preset: StylePreset) {
+    if (preset.type === "text") setTextSettings({ ...(preset.settings as TextSettings) });
+    if (preset.type === "graphic") {
+      setGraphicSettings({ ...(preset.settings as GraphicSettings) });
+      if (preset.assetRef?.kind === "image") setGraphicDataUrl(preset.assetRef.dataUrl);
+    }
+    if (preset.type === "pattern") {
+      setPatternSettings({ ...(preset.settings as PatternSettings) });
+      if (preset.assetRef?.kind === "tile") {
+        const existing = patterns.find((pattern) => pattern.dataUrl === preset.assetRef?.dataUrl);
+        if (existing) {
+          setActivePatternId(existing.id);
+        } else {
+          const id = `preset-tile-${Date.now()}`;
+          setCustomPatterns((current) => [...current, { id, name: `${preset.name} tile`, dataUrl: preset.assetRef!.dataUrl }]);
+          setActivePatternId(id);
+        }
+      }
+    }
+  }
+
   const currentDesigns = tab === "templates" ? templateDesigns : tab === "graphic" ? graphicDesigns : patternDesigns;
   const currentPreviewBackground = tab === "pattern" ? patternPreviewBackground : previewBackground;
+  const activeMockupPreset = MOCKUP_PRESETS.find((preset) => preset.id === activeMockupPresetId) || MOCKUP_PRESETS[0];
+
+  async function downloadMockupDesign(design: GeneratedDesign) {
+    try {
+      const blob = await composeMockupPngBlob(design.svg, activeMockupPreset);
+      downloadBlob(blob, design.filename.replace(/\.png$/i, "-mockup.png"));
+    } catch (downloadError) {
+      setError((downloadError as Error).message);
+    }
+  }
 
   return (
     <section className={styles.appShell}>
@@ -839,6 +987,7 @@ export default function PODDesignSuite() {
                 templateValues={templateValues}
                 setTemplateValues={setTemplateValues}
                 generate={generateTemplateDesigns}
+                savePreset={() => saveStylePreset("text")}
               />
               <TemplateControls
                 settings={textSettings}
@@ -863,6 +1012,7 @@ export default function PODDesignSuite() {
                 setSettings={setGraphicSettings}
                 generate={generateGraphicDesigns}
                 openFontImport={() => fontInputRef.current?.click()}
+                savePreset={() => saveStylePreset("graphic")}
               />
               <GraphicControls
                 settings={graphicSettings}
@@ -888,6 +1038,7 @@ export default function PODDesignSuite() {
                 setSettings={setPatternSettings}
                 generate={generatePatternDesigns}
                 handlePatternUpload={handlePatternUpload}
+                savePreset={() => saveStylePreset("pattern")}
               />
               <PatternControls
                 settings={patternSettings}
@@ -905,12 +1056,16 @@ export default function PODDesignSuite() {
             designs={currentDesigns}
             background={currentPreviewBackground}
             onDownload={downloadDesign}
+            onDownloadMockup={downloadMockupDesign}
             onDownloadZip={() => downloadZip(currentDesigns, `${tab}-designs.zip`)}
             onPreview={setSelectedPreview}
             zipProgress={zipProgress}
             onCancelZip={() => {
               zipCancelRef.current = true;
             }}
+            mockupPresets={MOCKUP_PRESETS}
+            activeMockupPresetId={activeMockupPresetId}
+            setActiveMockupPresetId={setActiveMockupPresetId}
           />
         </div>
       ) : (
@@ -919,6 +1074,12 @@ export default function PODDesignSuite() {
           removeFont={(fontName) => setCustomFonts((fonts) => fonts.filter((font) => font.name !== fontName))}
           importFonts={() => fontInputRef.current?.click()}
           exportWorkspace={exportWorkspace}
+          stylePresets={stylePresets}
+          presetName={presetName}
+          setPresetName={setPresetName}
+          applyStylePreset={applyStylePreset}
+          duplicateStylePreset={duplicateStylePreset}
+          activeTab={tab}
         />
       )}
 
@@ -949,6 +1110,7 @@ function TemplateInputPanel(props: {
   templateValues: string;
   setTemplateValues: (value: string) => void;
   generate: () => void;
+  savePreset: () => void;
 }) {
   return (
     <aside className={styles.panel}>
@@ -964,7 +1126,7 @@ function TemplateInputPanel(props: {
       <label className={styles.label}>Bulk values</label>
       <textarea className={styles.textarea} value={props.templateValues} onChange={(event) => props.setTemplateValues(event.target.value)} />
       <div className={styles.row}>
-        <button className={styles.secondaryButton}>♡ Save Template</button>
+        <button className={styles.secondaryButton} onClick={props.savePreset}>♡ Save StylePreset</button>
         <button className={styles.primaryButton} onClick={props.generate}>✦ Generate</button>
       </div>
     </aside>
@@ -1019,6 +1181,7 @@ function GraphicInputPanel(props: {
   setSettings: (settings: GraphicSettings) => void;
   generate: () => void;
   openFontImport: () => void;
+  savePreset: () => void;
 }) {
   const update = (patch: Partial<GraphicSettings>) => props.setSettings({ ...props.settings, ...patch });
   return (
@@ -1040,7 +1203,7 @@ function GraphicInputPanel(props: {
       <input className={styles.input} value={props.settings.subText} onChange={(event) => update({ subText: event.target.value })} />
       <div className={styles.warningInline} style={{ margin: "14px 0" }}>Custom fonts and uploaded graphics are temporary browser memory only.</div>
       <div className={styles.row}>
-        <button className={styles.secondaryButton}>♡ Save as Preset</button>
+        <button className={styles.secondaryButton} onClick={props.savePreset}>♡ Save StylePreset</button>
         <button className={styles.smallButton} onClick={props.openFontImport}>Aa Import Fonts</button>
         <button className={styles.primaryButton} onClick={props.generate}>✦ Generate</button>
       </div>
@@ -1118,6 +1281,7 @@ function PatternInputPanel(props: {
   setSettings: (settings: PatternSettings) => void;
   generate: () => void;
   handlePatternUpload: (event: ChangeEvent<HTMLInputElement>) => void;
+  savePreset: () => void;
 }) {
   const update = (patch: Partial<PatternSettings>) => props.setSettings({ ...props.settings, ...patch });
   return (
@@ -1137,7 +1301,10 @@ function PatternInputPanel(props: {
       <Range label="Pattern Offset Y" value={props.settings.patternOffsetY} min={-600} max={600} step={10} onChange={(patternOffsetY) => update({ patternOffsetY })} suffix="" />
       <label className={styles.label}>Bulk Slogans</label>
       <textarea className={styles.textarea} value={props.slogans} onChange={(event) => props.setSlogans(event.target.value)} />
-      <button className={styles.primaryButton} onClick={props.generate}>✦ Generate</button>
+      <div className={styles.row}>
+        <button className={styles.secondaryButton} onClick={props.savePreset}>♡ Save StylePreset</button>
+        <button className={styles.primaryButton} onClick={props.generate}>✦ Generate</button>
+      </div>
     </aside>
   );
 }
@@ -1184,11 +1351,16 @@ function PreviewPanel(props: {
   designs: GeneratedDesign[];
   background: PreviewBackground;
   onDownload: (design: GeneratedDesign) => void;
+  onDownloadMockup: (design: GeneratedDesign) => void;
   onDownloadZip: () => void;
   onPreview: (design: GeneratedDesign) => void;
   zipProgress: ZipProgress;
   onCancelZip: () => void;
+  mockupPresets: MockupPreset[];
+  activeMockupPresetId: string;
+  setActiveMockupPresetId: (value: string) => void;
 }) {
+  const selectedMockup = props.mockupPresets.find((preset) => preset.id === props.activeMockupPresetId) || props.mockupPresets[0];
   return (
     <section className={styles.panel}>
       <div className={styles.previewHeader}>
@@ -1216,6 +1388,16 @@ function PreviewPanel(props: {
           )}
         </div>
       )}
+      <div className={styles.controlGroup}>
+        <h3>Showcase Mockup (Optional)</h3>
+        <label className={styles.label}>Base PNG from forge/mockups</label>
+        <select className={styles.select} value={props.activeMockupPresetId} onChange={(event) => props.setActiveMockupPresetId(event.target.value)}>
+          {props.mockupPresets.map((preset) => (
+            <option key={preset.id} value={preset.id}>{preset.name}</option>
+          ))}
+        </select>
+        {selectedMockup.id !== "none" && <p className={styles.helpText}>Area: x {selectedMockup.printArea.x}, y {selectedMockup.printArea.y}, w {selectedMockup.printArea.w}, h {selectedMockup.printArea.h}</p>}
+      </div>
       {!props.designs.length ? (
         <div className={styles.warningInline}>Generate designs to see previews here.</div>
       ) : (
@@ -1231,6 +1413,7 @@ function PreviewPanel(props: {
               />
               <div className={styles.cardActions}>
                 <button className={styles.smallButton} onClick={() => props.onDownload(design)}>↓ Download PNG</button>
+                <button className={styles.smallButton} disabled={props.activeMockupPresetId === "none"} onClick={() => props.onDownloadMockup(design)}>↓ Download Mockup</button>
                 <span className={styles.cardMeta}>4500×5400 px<br />transparent</span>
               </div>
             </article>
@@ -1246,6 +1429,12 @@ function InfoPanel(props: {
   removeFont: (fontName: string) => void;
   importFonts: () => void;
   exportWorkspace: () => void;
+  stylePresets: StylePreset[];
+  presetName: string;
+  setPresetName: (value: string) => void;
+  applyStylePreset: (preset: StylePreset) => void;
+  duplicateStylePreset: (presetId: string) => void;
+  activeTab: ToolTab;
 }) {
   return (
     <section className={styles.infoGrid}>
@@ -1277,6 +1466,27 @@ function InfoPanel(props: {
           </div>
         )}
         <p className={styles.helpText}>Supported: .ttf, .otf, .woff, .woff2. Imported fonts are session-only.</p>
+      </div>
+      <div className={styles.infoCard}>
+        <h3>StylePreset Entity</h3>
+        <p>Save a reusable visual style (type + complete settings + image/tile reference when applicable), duplicate it, and apply it for batch generation.</p>
+        <label className={styles.label}>Preset name</label>
+        <input className={styles.input} value={props.presetName} onChange={(event) => props.setPresetName(event.target.value)} placeholder="Ex: western-vintage-v1" />
+        {!props.stylePresets.length ? (
+          <p>No StylePreset saved yet. Save from Text, Graphic, or Pattern tabs.</p>
+        ) : (
+          <div className={styles.chipList}>
+            {props.stylePresets.map((preset) => (
+              <div key={preset.id} className={styles.row}>
+                <button className={styles.chip} onClick={() => props.applyStylePreset(preset)}>
+                  {preset.name} [{preset.type}]
+                </button>
+                <button className={styles.smallButton} onClick={() => props.duplicateStylePreset(preset.id)}>Duplicate</button>
+              </div>
+            ))}
+          </div>
+        )}
+        <p className={styles.helpText}>Apply a preset, go to the matching tab, edit the phrase list and click Generate to create N designs with the same visual style.</p>
       </div>
       <div className={styles.infoCard}>
         <h3>Usage Tips</h3>
