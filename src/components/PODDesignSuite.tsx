@@ -85,6 +85,17 @@ type PatternPreset = {
   name: string;
   dataUrl: string;
 };
+type StylePresetType = "text" | "graphic" | "pattern";
+type StylePreset = {
+  id: string;
+  name: string;
+  type: StylePresetType;
+  settings: TextSettings | GraphicSettings | PatternSettings;
+  assetRef?: {
+    kind: "image" | "tile";
+    dataUrl: string;
+  };
+};
 
 const WIDTH = 4500;
 const HEIGHT = 5400;
@@ -603,6 +614,8 @@ export default function PODDesignSuite() {
   const [patternDesigns, setPatternDesigns] = useState<GeneratedDesign[]>([]);
   const [selectedPreview, setSelectedPreview] = useState<GeneratedDesign | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [stylePresets, setStylePresets] = useState<StylePreset[]>([]);
+  const [presetName, setPresetName] = useState("");
   const [activeMockupPresetId, setActiveMockupPresetId] = useState(MOCKUP_PRESETS[0].id);
   const fontInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -798,6 +811,46 @@ export default function PODDesignSuite() {
     downloadBlob(blob, "podforge-workspace.json");
   }
 
+  function saveStylePreset(type: StylePresetType) {
+    const trimmedName = presetName.trim() || `${type}-preset-${stylePresets.filter((preset) => preset.type === type).length + 1}`;
+    const preset: StylePreset = {
+      id: `${type}-${Date.now()}`,
+      name: trimmedName,
+      type,
+      settings: type === "text" ? { ...textSettings } : type === "graphic" ? { ...graphicSettings } : { ...patternSettings },
+      assetRef: type === "graphic" ? { kind: "image", dataUrl: graphicDataUrl } : type === "pattern" ? { kind: "tile", dataUrl: activePattern.dataUrl } : undefined,
+    };
+    setStylePresets((current) => [preset, ...current]);
+    setPresetName("");
+  }
+
+  function duplicateStylePreset(presetId: string) {
+    const preset = stylePresets.find((entry) => entry.id === presetId);
+    if (!preset) return;
+    setStylePresets((current) => [{ ...preset, id: `${preset.type}-${Date.now()}`, name: `${preset.name} copy` }, ...current]);
+  }
+
+  function applyStylePreset(preset: StylePreset) {
+    if (preset.type === "text") setTextSettings({ ...(preset.settings as TextSettings) });
+    if (preset.type === "graphic") {
+      setGraphicSettings({ ...(preset.settings as GraphicSettings) });
+      if (preset.assetRef?.kind === "image") setGraphicDataUrl(preset.assetRef.dataUrl);
+    }
+    if (preset.type === "pattern") {
+      setPatternSettings({ ...(preset.settings as PatternSettings) });
+      if (preset.assetRef?.kind === "tile") {
+        const existing = patterns.find((pattern) => pattern.dataUrl === preset.assetRef?.dataUrl);
+        if (existing) {
+          setActivePatternId(existing.id);
+        } else {
+          const id = `preset-tile-${Date.now()}`;
+          setCustomPatterns((current) => [...current, { id, name: `${preset.name} tile`, dataUrl: preset.assetRef!.dataUrl }]);
+          setActivePatternId(id);
+        }
+      }
+    }
+  }
+
   const currentDesigns = tab === "templates" ? templateDesigns : tab === "graphic" ? graphicDesigns : patternDesigns;
   const currentPreviewBackground = tab === "pattern" ? patternPreviewBackground : previewBackground;
   const activeMockupPreset = MOCKUP_PRESETS.find((preset) => preset.id === activeMockupPresetId) || MOCKUP_PRESETS[0];
@@ -856,6 +909,7 @@ export default function PODDesignSuite() {
                 templateValues={templateValues}
                 setTemplateValues={setTemplateValues}
                 generate={generateTemplateDesigns}
+                savePreset={() => saveStylePreset("text")}
               />
               <TemplateControls
                 settings={textSettings}
@@ -880,6 +934,7 @@ export default function PODDesignSuite() {
                 setSettings={setGraphicSettings}
                 generate={generateGraphicDesigns}
                 openFontImport={() => fontInputRef.current?.click()}
+                savePreset={() => saveStylePreset("graphic")}
               />
               <GraphicControls
                 settings={graphicSettings}
@@ -905,6 +960,7 @@ export default function PODDesignSuite() {
                 setSettings={setPatternSettings}
                 generate={generatePatternDesigns}
                 handlePatternUpload={handlePatternUpload}
+                savePreset={() => saveStylePreset("pattern")}
               />
               <PatternControls
                 settings={patternSettings}
@@ -936,6 +992,12 @@ export default function PODDesignSuite() {
           removeFont={(fontName) => setCustomFonts((fonts) => fonts.filter((font) => font.name !== fontName))}
           importFonts={() => fontInputRef.current?.click()}
           exportWorkspace={exportWorkspace}
+          stylePresets={stylePresets}
+          presetName={presetName}
+          setPresetName={setPresetName}
+          applyStylePreset={applyStylePreset}
+          duplicateStylePreset={duplicateStylePreset}
+          activeTab={tab}
         />
       )}
 
@@ -966,6 +1028,7 @@ function TemplateInputPanel(props: {
   templateValues: string;
   setTemplateValues: (value: string) => void;
   generate: () => void;
+  savePreset: () => void;
 }) {
   return (
     <aside className={styles.panel}>
@@ -981,7 +1044,7 @@ function TemplateInputPanel(props: {
       <label className={styles.label}>Bulk values</label>
       <textarea className={styles.textarea} value={props.templateValues} onChange={(event) => props.setTemplateValues(event.target.value)} />
       <div className={styles.row}>
-        <button className={styles.secondaryButton}>♡ Save Template</button>
+        <button className={styles.secondaryButton} onClick={props.savePreset}>♡ Save StylePreset</button>
         <button className={styles.primaryButton} onClick={props.generate}>✦ Generate</button>
       </div>
     </aside>
@@ -1036,6 +1099,7 @@ function GraphicInputPanel(props: {
   setSettings: (settings: GraphicSettings) => void;
   generate: () => void;
   openFontImport: () => void;
+  savePreset: () => void;
 }) {
   const update = (patch: Partial<GraphicSettings>) => props.setSettings({ ...props.settings, ...patch });
   return (
@@ -1057,7 +1121,7 @@ function GraphicInputPanel(props: {
       <input className={styles.input} value={props.settings.subText} onChange={(event) => update({ subText: event.target.value })} />
       <div className={styles.warningInline} style={{ margin: "14px 0" }}>Custom fonts and uploaded graphics are temporary browser memory only.</div>
       <div className={styles.row}>
-        <button className={styles.secondaryButton}>♡ Save as Preset</button>
+        <button className={styles.secondaryButton} onClick={props.savePreset}>♡ Save StylePreset</button>
         <button className={styles.smallButton} onClick={props.openFontImport}>Aa Import Fonts</button>
         <button className={styles.primaryButton} onClick={props.generate}>✦ Generate</button>
       </div>
@@ -1135,6 +1199,7 @@ function PatternInputPanel(props: {
   setSettings: (settings: PatternSettings) => void;
   generate: () => void;
   handlePatternUpload: (event: ChangeEvent<HTMLInputElement>) => void;
+  savePreset: () => void;
 }) {
   const update = (patch: Partial<PatternSettings>) => props.setSettings({ ...props.settings, ...patch });
   return (
@@ -1154,7 +1219,10 @@ function PatternInputPanel(props: {
       <Range label="Pattern Offset Y" value={props.settings.patternOffsetY} min={-600} max={600} step={10} onChange={(patternOffsetY) => update({ patternOffsetY })} suffix="" />
       <label className={styles.label}>Bulk Slogans</label>
       <textarea className={styles.textarea} value={props.slogans} onChange={(event) => props.setSlogans(event.target.value)} />
-      <button className={styles.primaryButton} onClick={props.generate}>✦ Generate</button>
+      <div className={styles.row}>
+        <button className={styles.secondaryButton} onClick={props.savePreset}>♡ Save StylePreset</button>
+        <button className={styles.primaryButton} onClick={props.generate}>✦ Generate</button>
+      </div>
     </aside>
   );
 }
@@ -1256,6 +1324,12 @@ function InfoPanel(props: {
   removeFont: (fontName: string) => void;
   importFonts: () => void;
   exportWorkspace: () => void;
+  stylePresets: StylePreset[];
+  presetName: string;
+  setPresetName: (value: string) => void;
+  applyStylePreset: (preset: StylePreset) => void;
+  duplicateStylePreset: (presetId: string) => void;
+  activeTab: ToolTab;
 }) {
   return (
     <section className={styles.infoGrid}>
@@ -1287,6 +1361,27 @@ function InfoPanel(props: {
           </div>
         )}
         <p className={styles.helpText}>Supported: .ttf, .otf, .woff, .woff2. Imported fonts are session-only.</p>
+      </div>
+      <div className={styles.infoCard}>
+        <h3>StylePreset Entity</h3>
+        <p>Save a reusable visual style (type + complete settings + image/tile reference when applicable), duplicate it, and apply it for batch generation.</p>
+        <label className={styles.label}>Preset name</label>
+        <input className={styles.input} value={props.presetName} onChange={(event) => props.setPresetName(event.target.value)} placeholder="Ex: western-vintage-v1" />
+        {!props.stylePresets.length ? (
+          <p>No StylePreset saved yet. Save from Text, Graphic, or Pattern tabs.</p>
+        ) : (
+          <div className={styles.chipList}>
+            {props.stylePresets.map((preset) => (
+              <div key={preset.id} className={styles.row}>
+                <button className={styles.chip} onClick={() => props.applyStylePreset(preset)}>
+                  {preset.name} [{preset.type}]
+                </button>
+                <button className={styles.smallButton} onClick={() => props.duplicateStylePreset(preset.id)}>Duplicate</button>
+              </div>
+            ))}
+          </div>
+        )}
+        <p className={styles.helpText}>Apply a preset, go to the matching tab, edit the phrase list and click Generate to create N designs with the same visual style.</p>
       </div>
       <div className={styles.infoCard}>
         <h3>Usage Tips</h3>
