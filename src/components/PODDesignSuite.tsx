@@ -1,6 +1,8 @@
 "use client";
 
 import { ChangeEvent, useMemo, useRef, useState } from "react";
+import { parseCsvByHeaders, parseSimpleList } from "../lib/design/csvParser";
+import { parseTemplatePlaceholders } from "../lib/design/placeholderParser";
 import styles from "./PODDesignSuite.module.css";
 
 type ToolTab = "templates" | "graphic" | "pattern" | "info";
@@ -616,35 +618,37 @@ export default function PODDesignSuite() {
 
   function generateTemplateDesigns() {
     setError(null);
-    const values = parseLines(templateValues);
-    if (!template.trim()) return setError("Template is required.");
-    if (!values.length) return setError("Add at least one value.");
-    const placeholderMatches = Array.from(template.matchAll(/\{([^}]+)\}/g)).map((match) => match[1]);
-    if (!placeholderMatches.length) return setError("Template must include at least one {placeholder}.");
+    const placeholderResult = parseTemplatePlaceholders(template);
+    if ("error" in placeholderResult) return setError(placeholderResult.error);
 
-    const designs = values.map((rawValue, index) => {
-      let finalText = template;
-      if (placeholderMatches.length === 1) {
-        finalText = template.replaceAll(`{${placeholderMatches[0]}}`, rawValue);
-      } else {
-        const rows = templateValues.split(/\r?\n/g).filter(Boolean);
-        const headers = rows[0]?.split(",").map((header) => header.trim()) || [];
-        const data = rows[index + 1]?.split(",").map((cell) => cell.trim()) || rawValue.split(",").map((cell) => cell.trim());
-        placeholderMatches.forEach((placeholder) => {
-          const dataIndex = headers.indexOf(placeholder);
-          finalText = finalText.replaceAll(`{${placeholder}}`, data[dataIndex] || data[0] || placeholder);
-        });
+    const normalizedTemplate = template.trim();
+    const parsedEntries = placeholderResult.mode === "single-placeholder-list"
+      ? parseSimpleList(templateValues, placeholderResult.placeholders[0])
+      : parseCsvByHeaders(templateValues, placeholderResult.placeholders);
+
+    if ("error" in parsedEntries) return setError(parsedEntries.error);
+
+    const designs: GeneratedDesign[] = [];
+    for (const [index, entry] of parsedEntries.entries()) {
+      let finalText = normalizedTemplate;
+      for (const placeholder of placeholderResult.placeholders) {
+        finalText = finalText.replaceAll(`{${placeholder}}`, entry.replacements[placeholder]);
       }
-      const transformed = applyTransform(finalText, textSettings.transform);
+
+      const normalizedText = finalText.replace(/\s+/g, " ").trim();
+      if (!normalizedText) return setError(`Generated text is empty at row ${index + 1}.`);
+
+      const transformed = applyTransform(normalizedText, textSettings.transform);
       const lines = splitText(transformed, textSettings.lineBreakMode);
       const svg = lineTextSvg(lines, textSettings, customFonts);
-      return {
+      designs.push({
         id: `template-${index}`,
-        label: finalText,
-        filename: `${slugify(template)}-${slugify(rawValue)}.png`,
+        label: normalizedText,
+        filename: `${slugify(normalizedTemplate)}-${slugify(entry.rawValue)}.png`,
         svg,
-      };
-    });
+      });
+    }
+
     setTemplateDesigns(designs);
   }
 
