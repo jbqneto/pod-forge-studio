@@ -32,6 +32,9 @@ import {
   CustomFont,
   FontSource,
   GeneratedDesign,
+  GeneratedDesignOverrides,
+  GeneratedDesignSource,
+  GeneratedDesignTool,
   GraphicSettings,
   PatternPreset,
   PatternSettings,
@@ -42,14 +45,14 @@ import {
   Transform
 } from "@/lib/podforge";
 
-import { parseCsvByHeaders, parseSimpleList } from "../lib/design/csvParser";
-import { parseTemplatePlaceholders } from "../lib/design/placeholderParser";
 import styles from "./PODDesignSuite.module.css";
+import { DEFAULT_MOCKUPS, MOCKUP_STORAGE_KEY, type MockupConfig, type MockupDrawArea } from "@/config/mockups";
 import { parseTemplateInput } from "@/lib/templateParser";
 
 type MockupRect = { x: number; y: number; w: number; h: number };
 type CanvasView = { zoom: number; panX: number; panY: number };
 type GuidePreset = "edges-center" | "quarters" | "thirds" | "eighths";
+type MockupInteractionMode = "draw" | "pan";
 type MockupEditorSnapshot = {
   mockupName: string;
   mockupBaseDataUrl: string;
@@ -64,6 +67,7 @@ type MockupEditorSnapshot = {
   mockupGuidePreset: GuidePreset;
   mockupSnapThreshold: number;
   mockupGridStep: number;
+  mockupInteractionMode: MockupInteractionMode;
 };
 type PanGesture = {
   startClientX: number;
@@ -83,12 +87,6 @@ type ZipProgress = {
   report: { filename: string; status: "ok" | "error"; message?: string }[];
 }
 
-type MockupPreset = {
-  id: string;
-  name: string;
-  basePngPath: string;
-  printArea: { x: number; y: number; w: number; h: number };
-};
 type StylePresetType = "text" | "graphic" | "pattern";
 type StylePreset = {
   id: string;
@@ -120,13 +118,107 @@ type MockupGesture =
       stageHeight: number;
     };
 
-const MOCKUP_PRESETS: MockupPreset[] = [
-  { id: "none", name: "No mockup", basePngPath: "", printArea: { x: 0, y: 0, w: 0, h: 0 } },
-  { id: "tee-front-classic", name: "Classic Tee Front", basePngPath: "/forge/mockups/tee-front-classic.png", printArea: { x: 1320, y: 1290, w: 1860, h: 2232 } },
-  { id: "hoodie-front-classic", name: "Classic Hoodie Front", basePngPath: "/forge/mockups/hoodie-front-classic.png", printArea: { x: 1410, y: 1450, w: 1680, h: 2016 } },
-];
+type SelectedPreviewRef = {
+  tool: GeneratedDesignTool;
+  id: string;
+};
 
-const MOCKUP_STORAGE_KEY = "podforge-studio.mockups.v1";
+type GraphicDragState = {
+  startClientX: number;
+  startClientY: number;
+  startOffsetX: number;
+  startOffsetY: number;
+  stageWidth: number;
+  stageHeight: number;
+};
+
+type MockupDrawGesture = {
+  startClientX: number;
+  startClientY: number;
+  startPoint: { x: number; y: number };
+  stageWidth: number;
+  stageHeight: number;
+};
+
+function mergeTextSettings(settings: TextSettings, overrides: GeneratedDesignOverrides) {
+  return {
+    ...settings,
+    fontSize: overrides.textFontSize ?? settings.fontSize,
+  };
+}
+
+function mergeGraphicSettings(settings: GraphicSettings, overrides: GeneratedDesignOverrides) {
+  return {
+    ...settings,
+    graphicOffsetX: overrides.graphicOffsetX ?? settings.graphicOffsetX ?? 0,
+    graphicOffsetY: overrides.graphicOffsetY ?? settings.graphicOffsetY ?? 0,
+  };
+}
+
+function mergePatternSettings(settings: PatternSettings, overrides: GeneratedDesignOverrides) {
+  return {
+    ...settings,
+    fontSize: overrides.textFontSize ?? settings.fontSize,
+  };
+}
+
+function renderGeneratedDesign(design: GeneratedDesign, customFonts: CustomFont[]) {
+  if (design.tool === "templates") {
+    const source = design.source as Extract<GeneratedDesignSource, { tool: "templates" }>;
+    const settings = mergeTextSettings(source.settings, design.overrides);
+    const lines = splitText(applyTransform(source.valuesRow, settings.transform), settings.lineBreakMode);
+    return lineTextSvg(lines, settings, customFonts);
+  }
+
+  if (design.tool === "graphic") {
+    const source = design.source as Extract<GeneratedDesignSource, { tool: "graphic" }>;
+    const settings = mergeGraphicSettings(source.settings, design.overrides);
+    return buildGraphicSvg({
+      slogan: source.slogan,
+      graphicDataUrl: source.graphicDataUrl,
+      settings,
+      customFonts,
+      graphicOffsetX: settings.graphicOffsetX,
+      graphicOffsetY: settings.graphicOffsetY,
+    });
+  }
+
+  const source = design.source as Extract<GeneratedDesignSource, { tool: "pattern" }>;
+  const settings = mergePatternSettings(source.settings, design.overrides);
+  return buildPatternSvg({
+    slogan: source.slogan,
+    pattern: source.pattern,
+    settings,
+    customFonts,
+  });
+}
+
+function getDesignTextFontSize(design: GeneratedDesign) {
+  return design.overrides.textFontSize ?? design.source.settings.fontSize;
+}
+
+function getGraphicBox(settings: GraphicSettings, overrides: GeneratedDesignOverrides) {
+  const width = WIDTH * (settings.graphicSize / 100);
+  const height = width;
+  const baseX =
+    settings.graphicAlign === "left"
+      ? WIDTH * 0.1
+      : settings.graphicAlign === "right"
+        ? WIDTH - width - WIDTH * 0.1
+        : (WIDTH - width) / 2;
+  const baseY = HEIGHT / 2 - height / 2 + settings.graphicVertical * 16;
+  const x = baseX + (overrides.graphicOffsetX ?? settings.graphicOffsetX ?? 0);
+  const y = baseY + (overrides.graphicOffsetY ?? settings.graphicOffsetY ?? 0);
+
+  return { x, y, width, height };
+}
+
+const EMPTY_MOCKUP: MockupConfig = {
+  id: "none",
+  name: "No mockup",
+  fileUrl: "",
+  drawArea: { x: 0, y: 0, w: 0, h: 0 },
+};
 const GUIDE_PRESETS: Record<GuidePreset, number[]> = {
   "edges-center": [0, 0.5, 1],
   quarters: [0, 0.25, 0.5, 0.75, 1],
@@ -280,9 +372,9 @@ function loadImage(src: string) {
   });
 }
 
-async function composeMockupPngBlob(svg: string, mockup: MockupPreset) {
+async function composeMockupPngBlob(svg: string, mockup: MockupConfig) {
   if (mockup.id === "none") throw new Error("Select a mockup preset before exporting showcase mockup.");
-  const [designBlob, mockupImage] = await Promise.all([svgToPngBlob(svg), loadImage(mockup.basePngPath)]);
+  const [designBlob, mockupImage] = await Promise.all([svgToPngBlob(svg), loadImage(mockup.fileUrl)]);
   const designUrl = URL.createObjectURL(designBlob);
   try {
     const designImage = await loadImage(designUrl);
@@ -292,7 +384,7 @@ async function composeMockupPngBlob(svg: string, mockup: MockupPreset) {
     const context = canvas.getContext("2d");
     if (!context) throw new Error("Could not compose mockup export.");
     context.drawImage(mockupImage, 0, 0, canvas.width, canvas.height);
-    context.drawImage(designImage, mockup.printArea.x, mockup.printArea.y, mockup.printArea.w, mockup.printArea.h);
+    context.drawImage(designImage, mockup.drawArea.x, mockup.drawArea.y, mockup.drawArea.w, mockup.drawArea.h);
     return await new Promise<Blob>((resolve, reject) => {
       canvas.toBlob((blob) => {
         if (blob) resolve(blob);
@@ -302,6 +394,26 @@ async function composeMockupPngBlob(svg: string, mockup: MockupPreset) {
   } finally {
     URL.revokeObjectURL(designUrl);
   }
+}
+
+type LegacyMockupShape = Partial<MockupConfig> & {
+  basePngPath?: string;
+  printArea?: MockupDrawArea;
+  drawArea?: MockupDrawArea;
+  fileUrl?: string;
+};
+
+function normalizeMockupConfig(mockup: LegacyMockupShape | null | undefined): MockupConfig | null {
+  if (!mockup || typeof mockup.id !== "string" || typeof mockup.name !== "string") return null;
+  const fileUrl = mockup.fileUrl ?? mockup.basePngPath;
+  const drawArea = mockup.drawArea ?? mockup.printArea;
+  if (typeof fileUrl !== "string" || !drawArea) return null;
+  return {
+    id: mockup.id,
+    name: mockup.name,
+    fileUrl,
+    drawArea,
+  };
 }
 
 export default function PODDesignSuite() {
@@ -321,7 +433,7 @@ export default function PODDesignSuite() {
   const [templateDesigns, setTemplateDesigns] = useState<GeneratedDesign[]>([]);
   const [graphicDesigns, setGraphicDesigns] = useState<GeneratedDesign[]>([]);
   const [patternDesigns, setPatternDesigns] = useState<GeneratedDesign[]>([]);
-  const [selectedPreview, setSelectedPreview] = useState<GeneratedDesign | null>(null);
+  const [selectedPreviewRef, setSelectedPreviewRef] = useState<SelectedPreviewRef | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [zipProgress, setZipProgress] = useState<ZipProgress>({
     active: false,
@@ -336,9 +448,9 @@ export default function PODDesignSuite() {
   const zipCancelRef = useRef(false);
   const [stylePresets, setStylePresets] = useState<StylePreset[]>([]);
   const [presetName, setPresetName] = useState("");
-  const [activeMockupPresetId, setActiveMockupPresetId] = useState(MOCKUP_PRESETS[0].id);
+  const [activeMockupPresetId, setActiveMockupPresetId] = useState(DEFAULT_MOCKUPS[0].id);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
-  const [localMockups, setLocalMockups] = useState<MockupPreset[]>([]);
+  const [localMockups, setLocalMockups] = useState<MockupConfig[]>([]);
   const [mockupName, setMockupName] = useState("");
   const [mockupBaseDataUrl, setMockupBaseDataUrl] = useState("");
   const [mockupX, setMockupX] = useState(1320);
@@ -355,37 +467,38 @@ export default function PODDesignSuite() {
   const [mockupGuidePreset, setMockupGuidePreset] = useState<GuidePreset>("quarters");
   const [mockupSnapThreshold, setMockupSnapThreshold] = useState(28);
   const [mockupGridStep, setMockupGridStep] = useState(24);
+  const [mockupInteractionMode, setMockupInteractionMode] = useState<MockupInteractionMode>("draw");
   const [previewViewport, setPreviewViewport] = useState<CanvasView>(DEFAULT_CANVAS_VIEW);
   const [previewPanGesture, setPreviewPanGesture] = useState<PanGesture | null>(null);
   const [mockupUndoStack, setMockupUndoStack] = useState<MockupEditorSnapshot[]>([]);
   const [mockupRedoStack, setMockupRedoStack] = useState<MockupEditorSnapshot[]>([]);
+  const [graphicEditorEnabled, setGraphicEditorEnabled] = useState(false);
   const fontInputRef = useRef<HTMLInputElement | null>(null);
   const workspaceInputRef = useRef<HTMLInputElement | null>(null);
   const mockupInputRef = useRef<HTMLInputElement | null>(null);
   const mockupStageRef = useRef<HTMLDivElement | null>(null);
   const previewStageRef = useRef<HTMLDivElement | null>(null);
+  const graphicDragStateRef = useRef<GraphicDragState | null>(null);
+  const mockupDrawGestureRef = useRef<MockupDrawGesture | null>(null);
   const mockupsLoadedRef = useRef(false);
 
   const checkerStyles = { checker: styles.checker };
 
   const basePatterns = useMemo(() => getPatternPresets(), []);
   const patterns = useMemo(() => [...basePatterns, ...customPatterns], [basePatterns, customPatterns]);
-  const mockups = useMemo(() => [...MOCKUP_PRESETS, ...localMockups], [localMockups]);
+  const mockups = useMemo(() => [EMPTY_MOCKUP, ...DEFAULT_MOCKUPS, ...localMockups], [localMockups]);
   const [activePatternId, setActivePatternId] = useState("realtree-camo");
   const activePattern = patterns.find((item) => item.id === activePatternId) || patterns[0];
-  const hasGeneratedTemplate = templateDesigns.length > 0;
-  const hasGeneratedGraphic = graphicDesigns.length > 0;
-  const hasGeneratedPattern = patternDesigns.length > 0;
   const canUndoMockup = mockupUndoStack.length > 0;
   const canRedoMockup = mockupRedoStack.length > 0;
-
-  const allFonts = useMemo(
-    () => [
-      ...BASE_FONTS.map((name) => ({ name, source: "google" as FontSource })),
-      ...customFonts.map((font) => ({ name: font.name, source: "custom" as FontSource })),
-    ],
-    [customFonts],
-  );
+  const allDesigns = [...templateDesigns, ...graphicDesigns, ...patternDesigns];
+  const selectedPreview =
+    selectedPreviewRef ? allDesigns.find((design) => design.tool === selectedPreviewRef.tool && design.id === selectedPreviewRef.id) || null : null;
+  const selectedPreviewTextFontSize = selectedPreview ? getDesignTextFontSize(selectedPreview) : null;
+  const selectedPreviewGraphicBox =
+    selectedPreview && selectedPreview.tool === "graphic"
+      ? getGraphicBox(selectedPreview.source.settings as GraphicSettings, selectedPreview.overrides)
+      : null;
 
   function renderFontOptions(heavyOnly = false) {
     const base = heavyOnly ? HEAVY_FONTS : BASE_FONTS;
@@ -422,6 +535,7 @@ export default function PODDesignSuite() {
       mockupGuidePreset,
       mockupSnapThreshold,
       mockupGridStep,
+      mockupInteractionMode,
     };
   }
 
@@ -439,6 +553,7 @@ export default function PODDesignSuite() {
     setMockupGuidePreset(snapshot.mockupGuidePreset);
     setMockupSnapThreshold(snapshot.mockupSnapThreshold);
     setMockupGridStep(snapshot.mockupGridStep);
+    setMockupInteractionMode(snapshot.mockupInteractionMode);
   }
 
   function pushMockupHistory() {
@@ -506,7 +621,8 @@ export default function PODDesignSuite() {
       if (event.key !== "Escape" || !selectedPreview) return;
       event.preventDefault();
       setPreviewPanGesture(null);
-      setSelectedPreview(null);
+      setSelectedPreviewRef(null);
+      setGraphicEditorEnabled(false);
     }
 
     window.addEventListener("keydown", onKeyDown);
@@ -519,10 +635,12 @@ export default function PODDesignSuite() {
 
   useEffect(() => {
     try {
-      const raw = window.localStorage.getItem(MOCKUP_STORAGE_KEY);
+      const raw = window.localStorage.getItem(MOCKUP_STORAGE_KEY) ?? window.localStorage.getItem("podforge-studio.mockups.v1");
       if (!raw) return;
-      const parsed = JSON.parse(raw) as MockupPreset[];
-      if (Array.isArray(parsed)) setLocalMockups(parsed);
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed)) return;
+      const normalized = parsed.map((mockup) => normalizeMockupConfig(mockup as LegacyMockupShape)).filter((mockup): mockup is MockupConfig => mockup !== null);
+      if (normalized.length) setLocalMockups(normalized);
     } catch {
       // Ignore malformed local storage and fall back to built-in mockups.
     } finally {
@@ -534,38 +652,6 @@ export default function PODDesignSuite() {
     if (!mockupsLoadedRef.current || typeof window === "undefined") return;
     window.localStorage.setItem(MOCKUP_STORAGE_KEY, JSON.stringify(localMockups));
   }, [localMockups]);
-
-  useEffect(() => {
-    const shouldRefresh =
-      (tab === "templates" && hasGeneratedTemplate) ||
-      (tab === "graphic" && hasGeneratedGraphic) ||
-      (tab === "pattern" && hasGeneratedPattern);
-
-    if (!shouldRefresh) return;
-
-    const timeout = window.setTimeout(() => {
-      if (tab === "templates") generateTemplateDesigns();
-      if (tab === "graphic") generateGraphicDesigns();
-      if (tab === "pattern") generatePatternDesigns();
-    }, 2000);
-
-    return () => window.clearTimeout(timeout);
-  }, [
-    activePatternId,
-    customFonts,
-    graphicDataUrl,
-    graphicSettings,
-    graphicSlogans,
-    hasGeneratedGraphic,
-    hasGeneratedPattern,
-    hasGeneratedTemplate,
-    patternSettings,
-    patternSlogans,
-    tab,
-    template,
-    templateValues,
-    textSettings,
-  ]);
 
   async function handleFontImport(event: ChangeEvent<HTMLInputElement>) {
     const files = Array.from(event.target.files || []);
@@ -593,88 +679,97 @@ export default function PODDesignSuite() {
   function generateTemplateDesigns() {
     setError(null);
     try {
+      if (templateDesigns.length > 0 && !window.confirm("Generating again will clear the custom config for individual files. Continue?")) {
+        return;
+      }
       const parsed = parseTemplateInput(template, templateValues);
       const designs = parsed.rows.map((row, index) => {
-        let finalText = template;
-        if (parsed.placeholders.length === 1) {
-          finalText = template.replaceAll(`{${parsed.placeholders[0]}}`, row.values[0] || "");
-        } else {
-          parsed.placeholders.forEach((placeholder, placeholderIndex) => {
-            finalText = finalText.replaceAll(`{${placeholder}}`, row.values[placeholderIndex] || placeholder);
-          });
-        }
-        const transformed = applyTransform(finalText, textSettings.transform);
-        const lines = splitText(transformed, textSettings.lineBreakMode);
-        const svg = lineTextSvg(lines, textSettings, customFonts);
+        const finalText = parsed.placeholders.reduce((accumulator, placeholder, placeholderIndex) => {
+          return accumulator.replaceAll(`{${placeholder}}`, row.values[placeholderIndex] || placeholder);
+        }, template.trim()).replace(/\s+/g, " ").trim();
+        const sourceSettings = { ...textSettings };
+        const svg = renderGeneratedDesign(
+          {
+            id: `template-${index}`,
+            tool: "templates",
+            label: finalText,
+            filename: `${slugify(template)}-${slugify(row.values.join("-"))}.png`,
+            svg: "",
+            source: {
+              tool: "templates",
+              template: template.trim(),
+              valuesRow: finalText,
+              settings: sourceSettings,
+            },
+            overrides: {},
+          },
+          customFonts,
+        );
         return {
           id: `template-${index}`,
+          tool: "templates" as const,
           label: finalText,
           filename: `${slugify(template)}-${slugify(row.values.join("-"))}.png`,
           svg,
+          source: {
+            tool: "templates" as const,
+            template: template.trim(),
+            valuesRow: finalText,
+            settings: sourceSettings,
+          },
+          overrides: {},
         };
       });
       setTemplateDesigns(designs);
     } catch (parseError) {
       setError((parseError as Error).message);
     }
-    
-    const placeholderResult = parseTemplatePlaceholders(template);
-    
-    if ("error" in placeholderResult) return setError(placeholderResult.error);
-
-    const normalizedTemplate = template.trim();
-    const parsedEntries = placeholderResult.mode === "single-placeholder-list"
-      ? parseSimpleList(templateValues, placeholderResult.placeholders[0])
-      : parseCsvByHeaders(templateValues, placeholderResult.placeholders);
-
-    if ("error" in parsedEntries) return setError(parsedEntries.error);
-
-    const designs: GeneratedDesign[] = [];
-    for (const [index, entry] of parsedEntries.entries()) {
-      let finalText = normalizedTemplate;
-      for (const placeholder of placeholderResult.placeholders) {
-        finalText = finalText.replaceAll(`{${placeholder}}`, entry.replacements[placeholder]);
-      }
-
-      const normalizedText = finalText.replace(/\s+/g, " ").trim();
-      if (!normalizedText) return setError(`Generated text is empty at row ${index + 1}.`);
-
-      const transformed = applyTransform(normalizedText, textSettings.transform);
-      const lines = splitText(transformed, textSettings.lineBreakMode);
-      const svg = lineTextSvg(lines, textSettings, customFonts);
-      designs.push({
-        id: `template-${index}`,
-        label: normalizedText,
-        filename: `${slugify(normalizedTemplate)}-${slugify(entry.rawValue)}.png`,
-        svg,
-      });
-    }
-
-    setTemplateDesigns(designs);
   }
 
   function generateGraphicDesigns() {
     setError(null);
+    if (graphicDesigns.length > 0 && !window.confirm("Generating again will clear the custom config for individual files. Continue?")) {
+      return;
+    }
     const slogans = parseLines(graphicSlogans);
     if (!slogans.length) return setError("Add at least one slogan.");
     const designs = slogans.map((slogan, index) => ({
       id: `graphic-${index}`,
+      tool: "graphic" as const,
       label: slogan,
       filename: `${slugify(slogan)}.png`,
-      svg: buildGraphicSvg({ slogan, graphicDataUrl, settings: graphicSettings, customFonts }),
+      svg: buildGraphicSvg({ slogan, graphicDataUrl, settings: { ...graphicSettings }, customFonts }),
+      source: {
+        tool: "graphic" as const,
+        slogan,
+        graphicDataUrl,
+        settings: { ...graphicSettings },
+      },
+      overrides: {},
     }));
     setGraphicDesigns(designs);
   }
 
   function generatePatternDesigns() {
     setError(null);
+    if (patternDesigns.length > 0 && !window.confirm("Generating again will clear the custom config for individual files. Continue?")) {
+      return;
+    }
     const slogans = parseLines(patternSlogans);
     if (!slogans.length) return setError("Add at least one pattern-fill slogan.");
     const designs = slogans.map((slogan, index) => ({
       id: `pattern-${index}`,
+      tool: "pattern" as const,
       label: slogan,
       filename: `${activePattern.id}-${slugify(slogan)}.png`,
-      svg: buildPatternSvg({ slogan, pattern: activePattern, settings: patternSettings, customFonts }),
+      svg: buildPatternSvg({ slogan, pattern: activePattern, settings: { ...patternSettings }, customFonts }),
+      source: {
+        tool: "pattern" as const,
+        slogan,
+        pattern: activePattern,
+        settings: { ...patternSettings },
+      },
+      overrides: {},
     }));
     setPatternDesigns(designs);
   }
@@ -798,11 +893,11 @@ export default function PODDesignSuite() {
       return;
     }
 
-    const nextPreset: MockupPreset = {
+    const nextPreset: MockupConfig = {
       id: editingMockupId ?? `local-${slugify(mockupName)}-${Date.now()}`,
       name: mockupName.trim(),
-      basePngPath: mockupBaseDataUrl,
-      printArea: { x: mockupX, y: mockupY, w: mockupW, h: mockupH },
+      fileUrl: mockupBaseDataUrl,
+      drawArea: { x: mockupX, y: mockupY, w: mockupW, h: mockupH },
     };
     pushMockupHistory();
     setLocalMockups((current) => {
@@ -820,11 +915,11 @@ export default function PODDesignSuite() {
     if (!mockup) return;
     pushMockupHistory();
     setMockupName(mockup.name);
-    setMockupBaseDataUrl(mockup.basePngPath);
-    setMockupX(mockup.printArea.x);
-    setMockupY(mockup.printArea.y);
-    setMockupW(mockup.printArea.w);
-    setMockupH(mockup.printArea.h);
+    setMockupBaseDataUrl(mockup.fileUrl);
+    setMockupX(mockup.drawArea.x);
+    setMockupY(mockup.drawArea.y);
+    setMockupW(mockup.drawArea.w);
+    setMockupH(mockup.drawArea.h);
     setActiveMockupPresetId(mockup.id);
     setEditingMockupId(mockup.id);
     setError(null);
@@ -847,8 +942,10 @@ export default function PODDesignSuite() {
     setMockupGuidePreset("quarters");
     setMockupSnapThreshold(28);
     setMockupGridStep(24);
+    setMockupInteractionMode("draw");
+    mockupDrawGestureRef.current = null;
     setEditingMockupId(null);
-    setActiveMockupPresetId(MOCKUP_PRESETS[0].id);
+    setActiveMockupPresetId(DEFAULT_MOCKUPS[0].id);
     setError(null);
   }
 
@@ -871,6 +968,15 @@ export default function PODDesignSuite() {
     setMockupY(safeRect.y);
     setMockupW(safeRect.w);
     setMockupH(safeRect.h);
+  }
+
+  function clientToMockupPoint(clientX: number, clientY: number, stageRect: DOMRect) {
+    const scaleX = stageRect.width / (mockupNaturalSize?.width || stageRect.width);
+    const scaleY = stageRect.height / (mockupNaturalSize?.height || stageRect.height);
+    return {
+      x: (clientX - stageRect.left - mockupViewport.panX) / Math.max(0.1, scaleX * mockupViewport.zoom),
+      y: (clientY - stageRect.top - mockupViewport.panY) / Math.max(0.1, scaleY * mockupViewport.zoom),
+    };
   }
 
   function adjustViewportZoom(view: CanvasView, nextZoom: number, point: { x: number; y: number }) {
@@ -896,19 +1002,33 @@ export default function PODDesignSuite() {
   }
 
   function handleMockupWheel(event: ReactWheelEvent<HTMLDivElement>) {
-    if (!mockupStageRef.current || !mockupBaseDataUrl) return;
     event.preventDefault();
-    pushMockupHistory();
-    const rect = mockupStageRef.current.getBoundingClientRect();
-    const point = { x: event.clientX - rect.left, y: event.clientY - rect.top };
-    const delta = event.deltaY > 0 ? -0.1 : 0.1;
-    setMockupViewport((current) => adjustViewportZoom(current, current.zoom + delta, point));
   }
 
   function resetMockupViewport() {
     pushMockupHistory();
     setMockupViewport(DEFAULT_CANVAS_VIEW);
     setMockupPanGesture(null);
+  }
+
+  function setMockupMode(mode: MockupInteractionMode) {
+    setMockupInteractionMode(mode);
+    setMockupPanGesture(null);
+    mockupDrawGestureRef.current = null;
+  }
+
+  function startMockupDraw(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!mockupNaturalSize || !mockupStageRef.current) return;
+    event.preventDefault();
+    pushMockupHistory();
+    const stageRect = mockupStageRef.current.getBoundingClientRect();
+    mockupDrawGestureRef.current = {
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startPoint: clientToMockupPoint(event.clientX, event.clientY, stageRect),
+      stageWidth: stageRect.width,
+      stageHeight: stageRect.height,
+    };
   }
 
   function startMockupMove(event: ReactPointerEvent<HTMLDivElement>) {
@@ -943,6 +1063,43 @@ export default function PODDesignSuite() {
       stageHeight: stageRect.height,
     });
   }
+
+  useEffect(() => {
+    if (!mockupDrawGestureRef.current) return;
+
+    const onPointerMove = (event: PointerEvent) => {
+      const drag = mockupDrawGestureRef.current;
+      if (!drag || !mockupStageRef.current) return;
+      const stageRect = mockupStageRef.current.getBoundingClientRect();
+      const currentPoint = clientToMockupPoint(event.clientX, event.clientY, stageRect);
+      const nextRect = {
+        x: Math.min(drag.startPoint.x, currentPoint.x),
+        y: Math.min(drag.startPoint.y, currentPoint.y),
+        w: Math.abs(currentPoint.x - drag.startPoint.x),
+        h: Math.abs(currentPoint.y - drag.startPoint.y),
+      };
+
+      const snapped =
+        mockupNaturalSize && mockupSnapEnabled
+          ? snapRectMovement(nextRect, mockupNaturalSize, mockupSnapThreshold, mockupGuidePreset)
+          : { rect: nextRect, guide: { vertical: null, horizontal: null } };
+
+      setMockupSnapGuide(snapped.guide);
+      updateMockupRect(snapped.rect);
+    };
+
+    const onPointerUp = () => {
+      mockupDrawGestureRef.current = null;
+      setMockupSnapGuide({ vertical: null, horizontal: null });
+    };
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    };
+  }, [mockupNaturalSize, mockupSnapEnabled, mockupSnapThreshold, mockupGuidePreset, mockupViewport.panX, mockupViewport.panY, mockupViewport.zoom]);
 
   useEffect(() => {
     if (!mockupGesture) return;
@@ -1031,7 +1188,7 @@ export default function PODDesignSuite() {
   function duplicateLocalMockup(mockupId: string) {
     const mockup = localMockups.find((item) => item.id === mockupId);
     if (!mockup) return;
-    const duplicated: MockupPreset = {
+    const duplicated: MockupConfig = {
       ...mockup,
       id: `local-${slugify(mockup.name)}-copy-${Date.now()}`,
       name: `${mockup.name} copy`,
@@ -1044,7 +1201,7 @@ export default function PODDesignSuite() {
   function deleteLocalMockup(mockupId: string) {
     setLocalMockups((current) => current.filter((mockup) => mockup.id !== mockupId));
     if (activeMockupPresetId === mockupId) {
-      setActiveMockupPresetId(MOCKUP_PRESETS[0].id);
+      setActiveMockupPresetId(DEFAULT_MOCKUPS[0].id);
     }
     if (editingMockupId === mockupId) {
       setEditingMockupId(null);
@@ -1073,8 +1230,13 @@ export default function PODDesignSuite() {
     if (!file) return;
     try {
       const raw = await file.text();
-      const parsed = JSON.parse(raw) as Partial<{ localMockups: MockupPreset[] }>;
-      if (Array.isArray(parsed.localMockups)) setLocalMockups(parsed.localMockups);
+      const parsed = JSON.parse(raw) as Partial<{ localMockups: MockupConfig[] }>;
+      if (Array.isArray(parsed.localMockups)) {
+        const normalized = parsed.localMockups
+          .map((mockup) => normalizeMockupConfig(mockup as LegacyMockupShape))
+          .filter((mockup): mockup is MockupConfig => mockup !== null);
+        setLocalMockups(normalized);
+      }
       setError("Mockup library imported.");
     } catch (mockupLibraryError) {
       setError(`Could not import mockup library. ${(mockupLibraryError as Error).message}`);
@@ -1119,7 +1281,7 @@ export default function PODDesignSuite() {
         patternSlogans: string;
         patternSettings: PatternSettings;
         customPatterns: PatternPreset[];
-        localMockups: MockupPreset[];
+        localMockups: MockupConfig[];
         activePatternId: string;
         activeMockupPresetId: string;
       }>;
@@ -1133,7 +1295,12 @@ export default function PODDesignSuite() {
       if (typeof workspace.patternSlogans === "string") setPatternSlogans(workspace.patternSlogans);
       if (workspace.patternSettings) setPatternSettings(workspace.patternSettings);
       if (Array.isArray(workspace.customPatterns)) setCustomPatterns(workspace.customPatterns);
-      if (Array.isArray(workspace.localMockups)) setLocalMockups(workspace.localMockups);
+      if (Array.isArray(workspace.localMockups)) {
+        const normalized = workspace.localMockups
+          .map((mockup) => normalizeMockupConfig(mockup as LegacyMockupShape))
+          .filter((mockup): mockup is MockupConfig => mockup !== null);
+        setLocalMockups(normalized);
+      }
       if (typeof workspace.activePatternId === "string") setActivePatternId(workspace.activePatternId);
       if (typeof workspace.activeMockupPresetId === "string") setActiveMockupPresetId(workspace.activeMockupPresetId);
       setError("Workspace imported. Regenerate to refresh previews.");
@@ -1185,14 +1352,36 @@ export default function PODDesignSuite() {
     }
   }
 
-  const currentDesigns = tab === "templates" ? templateDesigns : tab === "graphic" ? graphicDesigns : patternDesigns;
+  const activeDesigns = tab === "templates" ? templateDesigns : tab === "graphic" ? graphicDesigns : patternDesigns;
   const currentPreviewBackground = tab === "pattern" ? patternPreviewBackground : previewBackground;
   const activeMockupPreset = mockups.find((preset) => preset.id === activeMockupPresetId) || mockups[0];
 
   function openPreview(design: GeneratedDesign) {
-    setSelectedPreview(design);
+    setSelectedPreviewRef({ tool: design.tool, id: design.id });
     setPreviewViewport(DEFAULT_CANVAS_VIEW);
     setPreviewPanGesture(null);
+    setGraphicEditorEnabled(false);
+    graphicDragStateRef.current = null;
+  }
+
+  function updateDesignOverrides(tool: GeneratedDesignTool, id: string, patch: GeneratedDesignOverrides) {
+    const updateCollection = (setCollection: typeof setTemplateDesigns | typeof setGraphicDesigns | typeof setPatternDesigns) => {
+      setCollection((current) =>
+        current.map((design) => {
+          if (design.tool !== tool || design.id !== id) return design;
+          const nextOverrides = { ...design.overrides, ...patch };
+          return {
+            ...design,
+            overrides: nextOverrides,
+            svg: renderGeneratedDesign({ ...design, overrides: nextOverrides }, customFonts),
+          };
+        }),
+      );
+    };
+
+    if (tool === "templates") updateCollection(setTemplateDesigns);
+    if (tool === "graphic") updateCollection(setGraphicDesigns);
+    if (tool === "pattern") updateCollection(setPatternDesigns);
   }
 
   function adjustPreviewZoom(view: CanvasView, nextZoom: number, point: { x: number; y: number }) {
@@ -1229,6 +1418,50 @@ export default function PODDesignSuite() {
     setPreviewViewport(DEFAULT_CANVAS_VIEW);
     setPreviewPanGesture(null);
   }
+
+  function startGraphicDrag(event: ReactPointerEvent<HTMLButtonElement>, design: GeneratedDesign) {
+    if (design.tool !== "graphic" || !previewStageRef.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (!graphicEditorEnabled) return;
+
+    const rect = previewStageRef.current.getBoundingClientRect();
+    graphicDragStateRef.current = {
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startOffsetX: design.overrides.graphicOffsetX ?? 0,
+      startOffsetY: design.overrides.graphicOffsetY ?? 0,
+      stageWidth: rect.width,
+      stageHeight: rect.height,
+    };
+  }
+
+  useEffect(() => {
+    if (!graphicDragStateRef.current || !selectedPreview || selectedPreview.tool !== "graphic") return;
+
+    const onPointerMove = (event: PointerEvent) => {
+      const drag = graphicDragStateRef.current;
+      if (!drag) return;
+      const zoomFactor = Math.max(0.5, previewViewport.zoom);
+      const nextOffsetX = drag.startOffsetX + (((event.clientX - drag.startClientX) / Math.max(1, drag.stageWidth)) * WIDTH) / zoomFactor;
+      const nextOffsetY = drag.startOffsetY + (((event.clientY - drag.startClientY) / Math.max(1, drag.stageHeight)) * HEIGHT) / zoomFactor;
+      updateDesignOverrides(selectedPreview.tool, selectedPreview.id, {
+        graphicOffsetX: nextOffsetX,
+        graphicOffsetY: nextOffsetY,
+      });
+    };
+
+    const onPointerUp = () => {
+      graphicDragStateRef.current = null;
+    };
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    };
+  }, [selectedPreview, graphicEditorEnabled, previewViewport.zoom]);
 
   useEffect(() => {
     if (!previewPanGesture) return;
@@ -1385,11 +1618,11 @@ export default function PODDesignSuite() {
           )}
 
           <PreviewPanel
-            designs={currentDesigns}
+            designs={activeDesigns}
             background={currentPreviewBackground}
             onDownload={downloadDesign}
             onDownloadMockup={downloadMockupDesign}
-            onDownloadZip={() => downloadZip(currentDesigns, `${tab}-designs.zip`)}
+            onDownloadZip={() => downloadZip(activeDesigns, `${tab}-designs.zip`)}
             onPreview={openPreview}
             zipProgress={zipProgress}
             onCancelZip={() => {
@@ -1415,8 +1648,6 @@ export default function PODDesignSuite() {
           mockupNaturalSize={mockupNaturalSize}
           setMockupNaturalSize={setMockupNaturalSize}
           mockupStageRef={mockupStageRef}
-          mockupViewport={mockupViewport}
-          setMockupViewport={setMockupViewport}
           mockupSnapGuide={mockupSnapGuide}
           mockupSnapEnabled={mockupSnapEnabled}
           setMockupSnapEnabled={setMockupSnapEnabled}
@@ -1448,13 +1679,11 @@ export default function PODDesignSuite() {
             setMockupH(value);
           }}
           handleMockupImageUpload={handleMockupImageUpload}
-          startMockupPan={startMockupPan}
+          startMockupDraw={startMockupDraw}
           handleMockupWheel={handleMockupWheel}
-          startMockupMove={startMockupMove}
           startMockupResize={startMockupResize}
           saveLocalMockup={saveLocalMockup}
           resetMockupEditor={resetMockupEditor}
-          resetMockupViewport={resetMockupViewport}
           canUndoMockup={canUndoMockup}
           canRedoMockup={canRedoMockup}
           undoMockupHistory={undoMockupHistory}
@@ -1517,27 +1746,132 @@ export default function PODDesignSuite() {
               </div>
               <button className={styles.secondaryButton} onClick={() => {
                 setPreviewPanGesture(null);
-                setSelectedPreview(null);
+                setSelectedPreviewRef(null);
+                setGraphicEditorEnabled(false);
+                graphicDragStateRef.current = null;
               }}>Close</button>
             </div>
-            <div
-              ref={previewStageRef}
-              className={styles.modalPreviewFrame}
-              onPointerDown={startPreviewPan}
-              onWheel={handlePreviewWheel}
-            >
+            <div className={styles.modalBody}>
               <div
-                className={styles.modalPreviewCanvas}
-                style={{
-                  transform: `translate(${previewViewport.panX}px, ${previewViewport.panY}px) scale(${previewViewport.zoom})`,
-                }}
+                ref={previewStageRef}
+                className={styles.modalPreviewFrame}
+                onPointerDown={startPreviewPan}
+                onWheel={handlePreviewWheel}
               >
                 <div
-                  className={`${styles.designSurface} ${styles.modalPreview} ${getBackgroundClass(currentPreviewBackground, checkerStyles)}`}
-                  style={getBackgroundStyle(currentPreviewBackground)}
-                  dangerouslySetInnerHTML={{ __html: selectedPreview.svg }}
-                />
+                  className={styles.modalPreviewCanvas}
+                  style={{
+                    transform: `translate(${previewViewport.panX}px, ${previewViewport.panY}px) scale(${previewViewport.zoom})`,
+                  }}
+                >
+                  <div
+                    className={`${styles.designSurface} ${styles.modalPreview} ${getBackgroundClass(currentPreviewBackground, checkerStyles)}`}
+                    style={getBackgroundStyle(currentPreviewBackground)}
+                    dangerouslySetInnerHTML={{ __html: selectedPreview.svg }}
+                  />
+                  {selectedPreview.tool === "graphic" && selectedPreviewGraphicBox && (
+                    <button
+                      type="button"
+                      className={`${styles.graphicEditorOverlay} ${graphicEditorEnabled ? styles.graphicEditorOverlayActive : ""}`}
+                      style={{
+                        left: `${(selectedPreviewGraphicBox.x / WIDTH) * 100}%`,
+                        top: `${(selectedPreviewGraphicBox.y / HEIGHT) * 100}%`,
+                        width: `${(selectedPreviewGraphicBox.width / WIDTH) * 100}%`,
+                        height: `${(selectedPreviewGraphicBox.height / HEIGHT) * 100}%`,
+                      }}
+                      aria-label="Drag graphic remix image"
+                      onDoubleClick={() => setGraphicEditorEnabled((current) => !current)}
+                      onPointerDown={(event) => startGraphicDrag(event, selectedPreview)}
+                    >
+                      <span>{graphicEditorEnabled ? "Drag image" : "Double-click to edit image"}</span>
+                    </button>
+                  )}
+                </div>
               </div>
+              <aside className={styles.modalSidebar}>
+                {selectedPreview.tool === "templates" && selectedPreviewTextFontSize !== null && (
+                  <div className={styles.modalInspectorCard}>
+                    <h3>Item config</h3>
+                    <p className={styles.helpText}>Adjust the font size only for this card.</p>
+                    <Range
+                      label="Font Size"
+                      value={selectedPreviewTextFontSize}
+                      min={120}
+                      max={900}
+                      step={10}
+                      suffix="px"
+                      onChange={(fontSize) => updateDesignOverrides(selectedPreview.tool, selectedPreview.id, { textFontSize: fontSize })}
+                    />
+                  </div>
+                )}
+                {selectedPreview.tool === "graphic" && selectedPreviewGraphicBox && (
+                  <div className={styles.modalInspectorCard}>
+                    <h3>Graphic remix edit</h3>
+                    <p className={styles.helpText}>Double-click the image area, then drag it to shift this item only.</p>
+                    <label className={styles.toggleRow}>
+                      <input
+                        type="checkbox"
+                        checked={graphicEditorEnabled}
+                        onChange={(event) => {
+                          setGraphicEditorEnabled(event.target.checked);
+                          if (!event.target.checked) graphicDragStateRef.current = null;
+                        }}
+                      />
+                      <span>Enable image drag editor</span>
+                    </label>
+                    <Range
+                      label="Slogan Font Size"
+                      value={getDesignTextFontSize(selectedPreview)}
+                      min={120}
+                      max={700}
+                      step={10}
+                      suffix="px"
+                      onChange={(fontSize) => updateDesignOverrides(selectedPreview.tool, selectedPreview.id, { textFontSize: fontSize })}
+                    />
+                    <div className={styles.gridTwo}>
+                      <div>
+                        <label className={styles.label}>Offset X</label>
+                        <input
+                          className={styles.input}
+                          type="number"
+                          value={Math.round(selectedPreview.overrides.graphicOffsetX ?? 0)}
+                          onChange={(event) => updateDesignOverrides(selectedPreview.tool, selectedPreview.id, { graphicOffsetX: Number(event.target.value) || 0 })}
+                        />
+                      </div>
+                      <div>
+                        <label className={styles.label}>Offset Y</label>
+                        <input
+                          className={styles.input}
+                          type="number"
+                          value={Math.round(selectedPreview.overrides.graphicOffsetY ?? 0)}
+                          onChange={(event) => updateDesignOverrides(selectedPreview.tool, selectedPreview.id, { graphicOffsetY: Number(event.target.value) || 0 })}
+                        />
+                      </div>
+                    </div>
+                    <p className={styles.helpText}>The overlay box matches the graphic position in the SVG preview.</p>
+                  </div>
+                )}
+                {selectedPreview.tool === "pattern" && (
+                  <div className={styles.modalInspectorCard}>
+                    <h3>Item config</h3>
+                    <p className={styles.helpText}>Adjust the font size only for this card.</p>
+                    <Range
+                      label="Font Size"
+                      value={getDesignTextFontSize(selectedPreview)}
+                      min={200}
+                      max={1200}
+                      step={10}
+                      suffix="px"
+                      onChange={(fontSize) => updateDesignOverrides(selectedPreview.tool, selectedPreview.id, { textFontSize: fontSize })}
+                    />
+                  </div>
+                )}
+                <div className={styles.modalInspectorCard}>
+                  <h3>Preview controls</h3>
+                  <p className={styles.helpText}>Use zoom and pan to inspect the current card before exporting.</p>
+                  <button className={styles.smallButton} onClick={() => downloadDesign(selectedPreview)}>Download PNG</button>
+                </div>
+              </aside>
             </div>
           </div>
         </div>
@@ -1798,7 +2132,7 @@ function PreviewPanel(props: {
   onPreview: (design: GeneratedDesign) => void;
   zipProgress: ZipProgress;
   onCancelZip: () => void;
-  mockupPresets: MockupPreset[];
+  mockupPresets: MockupConfig[];
   activeMockupPresetId: string;
   setActiveMockupPresetId: (value: string) => void;
 }) {
@@ -1832,13 +2166,13 @@ function PreviewPanel(props: {
       )}
       <div className={styles.controlGroup}>
         <h3>Showcase Mockup (Optional)</h3>
-        <label className={styles.label}>Base PNG from forge/mockups</label>
+        <label className={styles.label}>Built-in and saved mockups</label>
         <select className={styles.select} value={props.activeMockupPresetId} onChange={(event) => props.setActiveMockupPresetId(event.target.value)}>
           {props.mockupPresets.map((preset) => (
             <option key={preset.id} value={preset.id}>{preset.name}</option>
           ))}
         </select>
-        {selectedMockup.id !== "none" && <p className={styles.helpText}>Area: x {selectedMockup.printArea.x}, y {selectedMockup.printArea.y}, w {selectedMockup.printArea.w}, h {selectedMockup.printArea.h}</p>}
+        {selectedMockup.id !== "none" && <p className={styles.helpText}>Area: x {selectedMockup.drawArea.x}, y {selectedMockup.drawArea.y}, w {selectedMockup.drawArea.w}, h {selectedMockup.drawArea.h}</p>}
       </div>
       {!props.designs.length ? (
         <div className={styles.warningInline}>Generate designs to see previews here.</div>
@@ -1856,7 +2190,6 @@ function PreviewPanel(props: {
               <div className={styles.cardActions}>
                 <button className={styles.smallButton} onClick={() => props.onDownload(design)}>↓ Download PNG</button>
                 <button className={styles.smallButton} disabled={props.activeMockupPresetId === "none"} onClick={() => props.onDownloadMockup(design)}>↓ Download Mockup</button>
-                <span className={styles.cardMeta}>4500×5400 px<br />transparent</span>
               </div>
             </article>
           ))}
@@ -1871,7 +2204,7 @@ function InfoPanel(props: {
   removeFont: (fontName: string) => void;
   importFonts: () => void;
   exportWorkspace: () => void;
-  mockups: MockupPreset[];
+  mockups: MockupConfig[];
   activeMockupPresetId: string;
   setActiveMockupPresetId: (value: string) => void;
   mockupName: string;
@@ -1880,8 +2213,6 @@ function InfoPanel(props: {
   mockupNaturalSize: { width: number; height: number } | null;
   setMockupNaturalSize: (value: { width: number; height: number } | null) => void;
   mockupStageRef: RefObject<HTMLDivElement | null>;
-  mockupViewport: CanvasView;
-  setMockupViewport: (value: CanvasView | ((current: CanvasView) => CanvasView)) => void;
   mockupSnapGuide: SnapGuide;
   mockupSnapEnabled: boolean;
   setMockupSnapEnabled: (value: boolean) => void;
@@ -1901,13 +2232,11 @@ function InfoPanel(props: {
   mockupH: number;
   setMockupH: (value: number) => void;
   handleMockupImageUpload: (event: ChangeEvent<HTMLInputElement>) => void;
-  startMockupPan: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  startMockupDraw: (event: ReactPointerEvent<HTMLDivElement>) => void;
   handleMockupWheel: (event: ReactWheelEvent<HTMLDivElement>) => void;
-  startMockupMove: (event: ReactPointerEvent<HTMLDivElement>) => void;
   startMockupResize: (handle: "nw" | "ne" | "sw" | "se", event: ReactPointerEvent<HTMLButtonElement>) => void;
   saveLocalMockup: () => void;
   resetMockupEditor: () => void;
-  resetMockupViewport: () => void;
   canUndoMockup: boolean;
   canRedoMockup: boolean;
   undoMockupHistory: () => void;
@@ -1957,43 +2286,15 @@ function InfoPanel(props: {
       </div>
       <div className={styles.infoCard}>
         <h3>Local Mockups</h3>
-        <p className={styles.helpText}>Save reusable mockups with a base image and a drawing area. Stored in this browser only.</p>
+        <p className={styles.helpText}>Three defaults are built in. Save reusable custom mockups with a base image and a drawing area in this browser only.</p>
         <div className={styles.mockupToolbar}>
           <div className={styles.mockupZoomControls}>
             <button className={styles.smallButton} disabled={!props.canUndoMockup} onClick={props.undoMockupHistory}>Undo</button>
             <button className={styles.smallButton} disabled={!props.canRedoMockup} onClick={props.redoMockupHistory}>Redo</button>
-            <button className={styles.smallButton} onClick={() => {
-              const rect = props.mockupStageRef.current?.getBoundingClientRect();
-              const point = rect ? { x: rect.width / 2, y: rect.height / 2 } : { x: 0, y: 0 };
-              props.pushMockupHistory();
-              props.setMockupViewport((current) => {
-                const clampedZoom = Math.min(2.5, Math.max(0.5, current.zoom - 0.1));
-                const scale = clampedZoom / current.zoom;
-                return {
-                  zoom: clampedZoom,
-                  panX: point.x - (point.x - current.panX) * scale,
-                  panY: point.y - (point.y - current.panY) * scale,
-                };
-              });
-            }}>-</button>
-            <span className={styles.mockupZoomLabel}>Zoom {Math.round(props.mockupViewport.zoom * 100)}%</span>
-            <button className={styles.smallButton} onClick={() => {
-              const rect = props.mockupStageRef.current?.getBoundingClientRect();
-              const point = rect ? { x: rect.width / 2, y: rect.height / 2 } : { x: 0, y: 0 };
-              props.pushMockupHistory();
-              props.setMockupViewport((current) => {
-                const clampedZoom = Math.min(2.5, Math.max(0.5, current.zoom + 0.1));
-                const scale = clampedZoom / current.zoom;
-                return {
-                  zoom: clampedZoom,
-                  panX: point.x - (point.x - current.panX) * scale,
-                  panY: point.y - (point.y - current.panY) * scale,
-                };
-              });
-            }}>+</button>
-            <button className={styles.smallButton} onClick={props.resetMockupViewport}>Reset View</button>
           </div>
-          <p className={styles.helpText}>Drag the empty canvas to pan. Use the wheel to zoom. Snap guides appear when the print area nears centers and edges.</p>
+          <p className={styles.helpText}>
+            Drag across the image to define the print area. The canvas does not zoom or pan with the mouse wheel.
+          </p>
         </div>
         <div className={styles.controlGroup}>
           <h3>Snap & Guides</h3>
@@ -2014,7 +2315,7 @@ function InfoPanel(props: {
         <div
           ref={props.mockupStageRef}
           className={styles.mockupStageViewport}
-          onPointerDown={props.startMockupPan}
+          onPointerDown={props.startMockupDraw}
           onWheel={props.handleMockupWheel}
           style={props.mockupNaturalSize ? { aspectRatio: `${props.mockupNaturalSize.width} / ${props.mockupNaturalSize.height}` } : undefined}
         >
@@ -2022,49 +2323,47 @@ function InfoPanel(props: {
             <>
               <div className={styles.mockupRulerTop} />
               <div className={styles.mockupRulerLeft} />
-            <div
-              className={styles.mockupCanvas}
-              style={{
-                transform: `translate(${props.mockupViewport.panX}px, ${props.mockupViewport.panY}px) scale(${props.mockupViewport.zoom})`,
-              }}
-            >
-              <img
-                src={props.mockupBaseDataUrl}
-                className={styles.mockupStageImage}
-                alt="Mockup base preview"
-                onLoad={(event) => props.setMockupNaturalSize({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })}
-              />
-              <div className={styles.mockupStageGrid} style={{ backgroundSize: `${props.mockupGridStep}px ${props.mockupGridStep}px` }} />
               <div
-                className={styles.mockupStageOverlay}
-                onPointerDown={props.startMockupMove}
+                className={styles.mockupCanvas}
                 style={{
-                  left: props.mockupNaturalSize ? `${(Math.max(0, props.mockupX) / props.mockupNaturalSize.width) * 100}%` : `${Math.max(0, props.mockupX)}px`,
-                  top: props.mockupNaturalSize ? `${(Math.max(0, props.mockupY) / props.mockupNaturalSize.height) * 100}%` : `${Math.max(0, props.mockupY)}px`,
-                  width: props.mockupNaturalSize ? `${(Math.max(1, props.mockupW) / props.mockupNaturalSize.width) * 100}%` : `${Math.max(1, props.mockupW)}px`,
-                  height: props.mockupNaturalSize ? `${(Math.max(1, props.mockupH) / props.mockupNaturalSize.height) * 100}%` : `${Math.max(1, props.mockupH)}px`,
+                  transform: "translate(0px, 0px) scale(1)",
                 }}
-              />
-              <div className={styles.mockupOverlayMeta}>
-                x {Math.round(props.mockupX)} y {Math.round(props.mockupY)} w {Math.round(props.mockupW)} h {Math.round(props.mockupH)}
+              >
+                <img
+                  src={props.mockupBaseDataUrl}
+                  className={styles.mockupStageImage}
+                  alt="Mockup base preview"
+                  onLoad={(event) => props.setMockupNaturalSize({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })}
+                />
+                <div className={styles.mockupStageGrid} style={{ backgroundSize: `${props.mockupGridStep}px ${props.mockupGridStep}px` }} />
+                <div
+                  className={styles.mockupStageOverlay}
+                  style={{
+                    left: props.mockupNaturalSize ? `${(Math.max(0, props.mockupX) / props.mockupNaturalSize.width) * 100}%` : `${Math.max(0, props.mockupX)}px`,
+                    top: props.mockupNaturalSize ? `${(Math.max(0, props.mockupY) / props.mockupNaturalSize.height) * 100}%` : `${Math.max(0, props.mockupY)}px`,
+                    width: props.mockupNaturalSize ? `${(Math.max(1, props.mockupW) / props.mockupNaturalSize.width) * 100}%` : `${Math.max(1, props.mockupW)}px`,
+                    height: props.mockupNaturalSize ? `${(Math.max(1, props.mockupH) / props.mockupNaturalSize.height) * 100}%` : `${Math.max(1, props.mockupH)}px`,
+                  }}
+                />
+                <div className={styles.mockupOverlayMeta}>
+                  x {Math.round(props.mockupX)} y {Math.round(props.mockupY)} w {Math.round(props.mockupW)} h {Math.round(props.mockupH)}
+                </div>
+                <div className={styles.mockupDrawHint}>
+                  Drag anywhere to set the print area
+                </div>
+                {props.mockupSnapGuide.vertical !== null && props.mockupNaturalSize && (
+                  <div
+                    className={styles.mockupGuideVertical}
+                    style={{ left: `${(props.mockupSnapGuide.vertical / props.mockupNaturalSize.width) * 100}%` }}
+                  />
+                )}
+                {props.mockupSnapGuide.horizontal !== null && props.mockupNaturalSize && (
+                  <div
+                    className={styles.mockupGuideHorizontal}
+                    style={{ top: `${(props.mockupSnapGuide.horizontal / props.mockupNaturalSize.height) * 100}%` }}
+                  />
+                )}
               </div>
-              {props.mockupSnapGuide.vertical !== null && props.mockupNaturalSize && (
-                <div
-                  className={styles.mockupGuideVertical}
-                  style={{ left: `${(props.mockupSnapGuide.vertical / props.mockupNaturalSize.width) * 100}%` }}
-                />
-              )}
-              {props.mockupSnapGuide.horizontal !== null && props.mockupNaturalSize && (
-                <div
-                  className={styles.mockupGuideHorizontal}
-                  style={{ top: `${(props.mockupSnapGuide.horizontal / props.mockupNaturalSize.height) * 100}%` }}
-                />
-              )}
-              <button className={styles.mockupResizeHandleNW} onPointerDown={(event) => props.startMockupResize("nw", event)} aria-label="Resize mockup area from top left" />
-              <button className={styles.mockupResizeHandleNE} onPointerDown={(event) => props.startMockupResize("ne", event)} aria-label="Resize mockup area from top right" />
-              <button className={styles.mockupResizeHandleSW} onPointerDown={(event) => props.startMockupResize("sw", event)} aria-label="Resize mockup area from bottom left" />
-              <button className={styles.mockupResizeHandleSE} onPointerDown={(event) => props.startMockupResize("se", event)} aria-label="Resize mockup area from bottom right" />
-            </div>
             </>
           ) : (
             <div className={styles.mockupStageEmpty}>Upload a base image to edit the print area visually.</div>
@@ -2077,34 +2376,18 @@ function InfoPanel(props: {
         }} />
         <label className={styles.label}>Mockup base image</label>
         <input className={styles.input} type="file" accept="image/png,image/jpeg,image/webp" onChange={props.handleMockupImageUpload} />
-        <div className={styles.gridTwo} style={{ marginTop: 12 }}>
-          <div>
-            <label className={styles.label}>Area X</label>
-            <input className={styles.input} type="number" value={props.mockupX} onChange={(event) => {
-              props.pushMockupHistory();
-              props.setMockupX(Number(event.target.value));
-            }} />
+        <div className={styles.mockupSummaryGrid}>
+          <div className={styles.mockupSummaryItem}>
+            <span>Position</span>
+            <strong>x {Math.round(props.mockupX)} / y {Math.round(props.mockupY)}</strong>
           </div>
-          <div>
-            <label className={styles.label}>Area Y</label>
-            <input className={styles.input} type="number" value={props.mockupY} onChange={(event) => {
-              props.pushMockupHistory();
-              props.setMockupY(Number(event.target.value));
-            }} />
+          <div className={styles.mockupSummaryItem}>
+            <span>Size</span>
+            <strong>w {Math.round(props.mockupW)} / h {Math.round(props.mockupH)}</strong>
           </div>
-          <div>
-            <label className={styles.label}>Area W</label>
-            <input className={styles.input} type="number" value={props.mockupW} onChange={(event) => {
-              props.pushMockupHistory();
-              props.setMockupW(Number(event.target.value));
-            }} />
-          </div>
-          <div>
-            <label className={styles.label}>Area H</label>
-            <input className={styles.input} type="number" value={props.mockupH} onChange={(event) => {
-              props.pushMockupHistory();
-              props.setMockupH(Number(event.target.value));
-            }} />
+          <div className={styles.mockupSummaryItem}>
+            <span>Editing</span>
+            <strong>{props.mockupNaturalSize ? "Active" : "Waiting for image"}</strong>
           </div>
         </div>
         <div className={styles.row} style={{ marginTop: 12 }}>
@@ -2170,18 +2453,36 @@ function InfoPanel(props: {
 }
 
 function ColorPicker(props: { value: string; onChange: (value: string) => void; presets: { label: string; value: string }[] }) {
+  const colorInputRef = useRef<HTMLInputElement | null>(null);
+  const isCustomColor = !props.presets.some((preset) => preset.value.toLowerCase() === props.value.toLowerCase());
+  const customLabel = isCustomColor ? props.value.toUpperCase() : "Custom";
+
   return (
     <>
       <label className={styles.label}>Color</label>
       <div className={styles.colorGrid}>
         {props.presets.map((preset) => (
-          <button key={preset.value} className={`${styles.colorChip} ${props.value === preset.value ? styles.activeChip : ""}`} onClick={() => props.onChange(preset.value)}>
+          <button type="button" key={preset.value} className={`${styles.colorChip} ${props.value === preset.value ? styles.activeChip : ""}`} onClick={() => props.onChange(preset.value)}>
             <span className={styles.colorSwatch} style={{ background: preset.value }} />
             {preset.label}
           </button>
         ))}
+        <button
+          type="button"
+          className={`${styles.colorChip} ${styles.customColorChip} ${isCustomColor ? styles.activeChip : ""}`}
+          onClick={() => colorInputRef.current?.click()}
+        >
+          <span className={styles.colorSwatch} style={{ background: props.value }} />
+          {customLabel}
+        </button>
       </div>
-      <input className={styles.input} type="color" value={props.value} onChange={(event) => props.onChange(event.target.value)} style={{ marginTop: 10 }} />
+      <input
+        ref={colorInputRef}
+        className="sr-only"
+        type="color"
+        value={props.value}
+        onChange={(event) => props.onChange(event.target.value)}
+      />
     </>
   );
 }

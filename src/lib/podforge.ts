@@ -11,11 +11,42 @@ export type CustomFont = {
   format: string;
 };
 
+export type GeneratedDesignTool = "templates" | "graphic" | "pattern";
+
+export type GeneratedDesignOverrides = {
+  textFontSize?: number;
+  graphicOffsetX?: number;
+  graphicOffsetY?: number;
+};
+
+export type GeneratedDesignSource =
+  | {
+      tool: "templates";
+      template: string;
+      valuesRow: string;
+      settings: TextSettings;
+    }
+  | {
+      tool: "graphic";
+      slogan: string;
+      graphicDataUrl: string;
+      settings: GraphicSettings;
+    }
+  | {
+      tool: "pattern";
+      slogan: string;
+      pattern: PatternPreset;
+      settings: PatternSettings;
+    };
+
 export type GeneratedDesign = {
   id: string;
+  tool: GeneratedDesignTool;
   label: string;
   filename: string;
   svg: string;
+  source: GeneratedDesignSource;
+  overrides: GeneratedDesignOverrides;
 };
 
 export type TextSettings = {
@@ -43,6 +74,8 @@ export type GraphicSettings = {
   graphicSize: number;
   graphicVertical: number;
   graphicAlign: Align;
+  graphicOffsetX?: number;
+  graphicOffsetY?: number;
   subText: string;
   subFontFamily: string;
   subFontSource: FontSource;
@@ -365,12 +398,16 @@ export function buildGraphicSvg(params: {
   graphicDataUrl: string;
   settings: GraphicSettings;
   customFonts: CustomFont[];
+  graphicOffsetX?: number;
+  graphicOffsetY?: number;
 }) {
   const slogan = applyTransform(params.slogan, params.settings.transform);
   const imageWidth = WIDTH * (params.settings.graphicSize / 100);
   const imageHeight = imageWidth;
-  const x = params.settings.graphicAlign === "left" ? WIDTH * 0.1 : params.settings.graphicAlign === "right" ? WIDTH - imageWidth - WIDTH * 0.1 : (WIDTH - imageWidth) / 2;
-  const y = HEIGHT / 2 - imageHeight / 2 + params.settings.graphicVertical * 16;
+  const baseX = params.settings.graphicAlign === "left" ? WIDTH * 0.1 : params.settings.graphicAlign === "right" ? WIDTH - imageWidth - WIDTH * 0.1 : (WIDTH - imageWidth) / 2;
+  const baseY = HEIGHT / 2 - imageHeight / 2 + params.settings.graphicVertical * 16;
+  const x = baseX + (params.graphicOffsetX ?? params.settings.graphicOffsetX ?? 0);
+  const y = baseY + (params.graphicOffsetY ?? params.settings.graphicOffsetY ?? 0);
   const mainY = params.settings.sloganPosition === "above" ? 1170 : 4140;
   const subY = params.settings.sloganPosition === "above" ? 4180 : 1070;
   const customStyle = fontFaceStyles(params.customFonts);

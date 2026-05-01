@@ -265,6 +265,11 @@
   font-weight: 800;
 }
 
+.customColorChip {
+  display: grid;
+  align-content: start;
+}
+
 .colorSwatch {
   display: block;
   height: 30px;
@@ -361,12 +366,6 @@
   gap: 10px;
   align-items: center;
   margin-top: 10px;
-}
-
-.cardMeta {
-  color: var(--muted);
-  font-size: 12px;
-  text-align: right;
 }
 
 .patternGrid {
@@ -536,6 +535,14 @@
   cursor: grab;
 }
 
+.mockupStageViewportDraw {
+  cursor: crosshair;
+}
+
+.mockupStageViewportPan {
+  cursor: grab;
+}
+
 .mockupCanvas {
   position: absolute;
   inset: 0;
@@ -613,8 +620,7 @@
   box-shadow:
     inset 0 0 0 1px rgba(255, 255, 255, 0.35),
     inset 0 0 0 2px rgba(0, 0, 0, 0.08);
-  cursor: move;
-  touch-action: none;
+  pointer-events: none;
 }
 
 .mockupStageOverlay::after {
@@ -642,6 +648,21 @@
   font-weight: 900;
   letter-spacing: 0.3px;
   pointer-events: none;
+}
+
+.mockupDrawHint {
+  position: absolute;
+  right: 10px;
+  top: 10px;
+  padding: 4px 8px;
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.3px;
+  pointer-events: none;
+  z-index: 4;
 }
 
 .mockupResizeHandleNW,
@@ -713,7 +734,7 @@
 }
 
 .modalContent {
-  width: min(92vw, 860px);
+  width: min(96vw, 1260px);
   max-height: 92vh;
   border: 4px solid var(--ink);
   background: var(--panel);
@@ -722,6 +743,13 @@
   display: grid;
   grid-template-rows: auto 1fr;
   gap: 12px;
+}
+
+.modalBody {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(260px, 380px);
+  gap: 16px;
+  min-height: 0;
 }
 
 .modalActions {
@@ -741,7 +769,7 @@
 
 .modalPreviewFrame {
   width: 100%;
-  height: min(78vh, 760px);
+  height: min(78vh, 780px);
   display: grid;
   place-items: center;
   overflow: hidden;
@@ -750,6 +778,7 @@
 }
 
 .modalPreviewCanvas {
+  position: relative;
   width: 100%;
   height: 100%;
   transform-origin: 0 0;
@@ -766,6 +795,79 @@
   width: 100%;
   height: 100%;
   display: block;
+}
+
+.modalSidebar {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  overflow: auto;
+}
+
+.modalInspectorCard {
+  border: 3px solid var(--ink);
+  border-radius: 8px;
+  background: var(--white);
+  padding: 14px;
+}
+
+.modalInspectorCard h3 {
+  margin: 0 0 10px;
+}
+
+.graphicEditorOverlay {
+  position: absolute;
+  border: 3px dashed var(--rust);
+  background: rgba(184, 74, 31, 0.12);
+  color: var(--rust-dark);
+  font-weight: 900;
+  text-align: center;
+  display: grid;
+  place-items: center;
+  padding: 8px;
+  cursor: move;
+}
+
+.graphicEditorOverlay span {
+  background: rgba(255, 255, 255, 0.9);
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
+.graphicEditorOverlayActive {
+  border-style: solid;
+  background: rgba(184, 74, 31, 0.18);
+}
+
+.mockupSummaryGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.mockupSummaryItem {
+  border: 2px solid var(--ink);
+  border-radius: 6px;
+  background: #fffef9;
+  padding: 10px 12px;
+  display: grid;
+  gap: 4px;
+}
+
+.mockupSummaryItem span {
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.mockupSummaryItem strong {
+  font-size: 13px;
+  font-weight: 900;
 }
 
 @media (pointer: coarse) {
@@ -787,6 +889,24 @@
 
   .mockupRulerLeft {
     width: 18px;
+  }
+}
+
+@media (max-width: 980px) {
+  .modalContent {
+    width: min(96vw, 960px);
+  }
+
+  .modalBody {
+    grid-template-columns: 1fr;
+  }
+
+  .modalPreviewFrame {
+    height: min(62vh, 620px);
+  }
+
+  .mockupSummaryGrid {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -820,6 +940,10 @@
 
   .modalPreviewFrame {
     height: min(70vh, 620px);
+  }
+
+  .mockupZoomControls {
+    align-items: stretch;
   }
 
   .footerActions {

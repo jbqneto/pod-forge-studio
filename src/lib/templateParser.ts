@@ -49,9 +49,13 @@ export function parseTemplateInput(template: string, rawInput: string): ParsedTe
     if (values.length < headers.length) {
       throw new Error(`CSV row ${row.sourceLine} has fewer columns than header.`);
     }
+    const replacements = headers.reduce<Record<string, string>>((accumulator, header, index) => {
+      accumulator[header] = values[index] || header;
+      return accumulator;
+    }, {});
     return {
       sourceLine: row.sourceLine,
-      values: headers.map((header, index) => values[index] || header),
+      values: placeholders.map((placeholder) => replacements[placeholder] || placeholder),
     };
   });
 
