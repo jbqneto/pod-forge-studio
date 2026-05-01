@@ -331,10 +331,33 @@
 }
 
 .previewCard {
+  position: relative;
   border: 3px solid var(--ink);
   border-radius: 8px;
   background: var(--white);
   padding: 12px;
+}
+
+.modifiedPreviewCard {
+  border-color: var(--rust);
+  background: #fff9f2;
+}
+
+.modifiedBadge {
+  position: absolute;
+  right: 14px;
+  top: 14px;
+  border: 2px solid var(--rust);
+  border-radius: 999px;
+  background: rgba(184, 74, 31, 0.1);
+  color: var(--rust-dark);
+  padding: 4px 9px;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  z-index: 2;
+  pointer-events: none;
 }
 
 .designSurface {

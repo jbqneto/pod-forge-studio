@@ -500,6 +500,98 @@ export default function PODDesignSuite() {
       ? getGraphicBox(selectedPreview.source.settings as GraphicSettings, selectedPreview.overrides)
       : null;
 
+  function rerenderTemplateDesign(design: GeneratedDesign, nextSettings: TextSettings) {
+    const nextDesign = {
+      ...design,
+      source: {
+        ...design.source,
+        settings: nextSettings,
+      },
+    } as GeneratedDesign;
+    return {
+      ...nextDesign,
+      svg: renderGeneratedDesign(nextDesign, customFonts),
+    };
+  }
+
+  function rerenderGraphicDesign(design: GeneratedDesign, nextSettings: GraphicSettings, nextGraphicDataUrl: string) {
+    const nextDesign = {
+      ...design,
+      source: {
+        ...design.source,
+        graphicDataUrl: nextGraphicDataUrl,
+        settings: nextSettings,
+      },
+    } as GeneratedDesign;
+    return {
+      ...nextDesign,
+      svg: renderGeneratedDesign(nextDesign, customFonts),
+    };
+  }
+
+  function rerenderPatternDesign(design: GeneratedDesign, nextSettings: PatternSettings, nextPattern: PatternPreset) {
+    const nextDesign = {
+      ...design,
+      source: {
+        ...design.source,
+        pattern: nextPattern,
+        settings: nextSettings,
+      },
+    } as GeneratedDesign;
+    return {
+      ...nextDesign,
+      svg: renderGeneratedDesign(nextDesign, customFonts),
+    };
+  }
+
+  function syncTemplateDesigns(nextSettings: TextSettings) {
+    setTemplateDesigns((current) => {
+      let changed = false;
+      const next = current.map((design) => {
+        if (design.modified) return design;
+        changed = true;
+        return rerenderTemplateDesign(design, nextSettings);
+      });
+      return changed ? next : current;
+    });
+  }
+
+  function syncGraphicDesigns(nextSettings: GraphicSettings, nextGraphicDataUrl: string) {
+    setGraphicDesigns((current) => {
+      let changed = false;
+      const next = current.map((design) => {
+        if (design.modified) return design;
+        changed = true;
+        return rerenderGraphicDesign(design, nextSettings, nextGraphicDataUrl);
+      });
+      return changed ? next : current;
+    });
+  }
+
+  function syncPatternDesigns(nextSettings: PatternSettings, nextPattern: PatternPreset) {
+    setPatternDesigns((current) => {
+      let changed = false;
+      const next = current.map((design) => {
+        if (design.modified) return design;
+        changed = true;
+        return rerenderPatternDesign(design, nextSettings, nextPattern);
+      });
+      return changed ? next : current;
+    });
+  }
+
+  useEffect(() => {
+    syncTemplateDesigns(textSettings);
+  }, [textSettings, customFonts]);
+
+  useEffect(() => {
+    syncGraphicDesigns(graphicSettings, graphicDataUrl);
+  }, [graphicSettings, graphicDataUrl, customFonts]);
+
+  useEffect(() => {
+    syncPatternDesigns(patternSettings, activePattern);
+  }, [patternSettings, activePattern, customFonts]);
+
   function renderFontOptions(heavyOnly = false) {
     const base = heavyOnly ? HEAVY_FONTS : BASE_FONTS;
     return [
@@ -695,6 +787,7 @@ export default function PODDesignSuite() {
             label: finalText,
             filename: `${slugify(template)}-${slugify(row.values.join("-"))}.png`,
             svg: "",
+            modified: false,
             source: {
               tool: "templates",
               template: template.trim(),
@@ -711,6 +804,7 @@ export default function PODDesignSuite() {
           label: finalText,
           filename: `${slugify(template)}-${slugify(row.values.join("-"))}.png`,
           svg,
+          modified: false,
           source: {
             tool: "templates" as const,
             template: template.trim(),
@@ -739,6 +833,7 @@ export default function PODDesignSuite() {
       label: slogan,
       filename: `${slugify(slogan)}.png`,
       svg: buildGraphicSvg({ slogan, graphicDataUrl, settings: { ...graphicSettings }, customFonts }),
+      modified: false,
       source: {
         tool: "graphic" as const,
         slogan,
@@ -763,6 +858,7 @@ export default function PODDesignSuite() {
       label: slogan,
       filename: `${activePattern.id}-${slugify(slogan)}.png`,
       svg: buildPatternSvg({ slogan, pattern: activePattern, settings: { ...patternSettings }, customFonts }),
+      modified: false,
       source: {
         tool: "pattern" as const,
         slogan,
@@ -1256,6 +1352,9 @@ export default function PODDesignSuite() {
       patternSlogans,
       patternSettings,
       customPatterns,
+      templateDesigns,
+      graphicDesigns,
+      patternDesigns,
       localMockups,
       activePatternId,
       activeMockupPresetId,
@@ -1281,6 +1380,9 @@ export default function PODDesignSuite() {
         patternSlogans: string;
         patternSettings: PatternSettings;
         customPatterns: PatternPreset[];
+        templateDesigns: GeneratedDesign[];
+        graphicDesigns: GeneratedDesign[];
+        patternDesigns: GeneratedDesign[];
         localMockups: MockupConfig[];
         activePatternId: string;
         activeMockupPresetId: string;
@@ -1295,6 +1397,51 @@ export default function PODDesignSuite() {
       if (typeof workspace.patternSlogans === "string") setPatternSlogans(workspace.patternSlogans);
       if (workspace.patternSettings) setPatternSettings(workspace.patternSettings);
       if (Array.isArray(workspace.customPatterns)) setCustomPatterns(workspace.customPatterns);
+      if (Array.isArray(workspace.templateDesigns)) {
+        setTemplateDesigns(
+          workspace.templateDesigns.filter(
+            (design): design is GeneratedDesign =>
+              typeof design?.id === "string" &&
+              (design.tool === "templates" || design.tool === "graphic" || design.tool === "pattern") &&
+              typeof design.label === "string" &&
+              typeof design.filename === "string" &&
+              typeof design.svg === "string" &&
+              typeof design.modified === "boolean" &&
+              !!design.source &&
+              !!design.overrides,
+          ),
+        );
+      }
+      if (Array.isArray(workspace.graphicDesigns)) {
+        setGraphicDesigns(
+          workspace.graphicDesigns.filter(
+            (design): design is GeneratedDesign =>
+              typeof design?.id === "string" &&
+              (design.tool === "templates" || design.tool === "graphic" || design.tool === "pattern") &&
+              typeof design.label === "string" &&
+              typeof design.filename === "string" &&
+              typeof design.svg === "string" &&
+              typeof design.modified === "boolean" &&
+              !!design.source &&
+              !!design.overrides,
+          ),
+        );
+      }
+      if (Array.isArray(workspace.patternDesigns)) {
+        setPatternDesigns(
+          workspace.patternDesigns.filter(
+            (design): design is GeneratedDesign =>
+              typeof design?.id === "string" &&
+              (design.tool === "templates" || design.tool === "graphic" || design.tool === "pattern") &&
+              typeof design.label === "string" &&
+              typeof design.filename === "string" &&
+              typeof design.svg === "string" &&
+              typeof design.modified === "boolean" &&
+              !!design.source &&
+              !!design.overrides,
+          ),
+        );
+      }
       if (Array.isArray(workspace.localMockups)) {
         const normalized = workspace.localMockups
           .map((mockup) => normalizeMockupConfig(mockup as LegacyMockupShape))
@@ -1370,10 +1517,14 @@ export default function PODDesignSuite() {
         current.map((design) => {
           if (design.tool !== tool || design.id !== id) return design;
           const nextOverrides = { ...design.overrides, ...patch };
-          return {
+          const nextDesign = {
             ...design,
             overrides: nextOverrides,
-            svg: renderGeneratedDesign({ ...design, overrides: nextOverrides }, customFonts),
+            modified: true,
+          } as GeneratedDesign;
+          return {
+            ...nextDesign,
+            svg: renderGeneratedDesign(nextDesign, customFonts),
           };
         }),
       );
@@ -1520,7 +1671,7 @@ export default function PODDesignSuite() {
 
       <header className={styles.topHeader}>
         <div className={styles.brand}>
-          <h1>Etsy POD Design Suite</h1>
+          <h1>T-Shirt Design Suite</h1>
           <p>Bulk print-ready design generators for POD sellers</p>
         </div>
         <div className={styles.memoryWarning}>
@@ -1537,7 +1688,7 @@ export default function PODDesignSuite() {
         <button className={`${styles.tabButton} ${tab === "templates" ? styles.activeTab : ""}`} onClick={() => setTab("templates")}>Tt Text Templates</button>
         <button className={`${styles.tabButton} ${tab === "graphic" ? styles.activeTab : ""}`} onClick={() => setTab("graphic")}>▧ Graphic Remix</button>
         <button className={`${styles.tabButton} ${tab === "pattern" ? styles.activeTab : ""}`} onClick={() => setTab("pattern")}>▦ Pattern Fill</button>
-        <button className={`${styles.tabButton} ${tab === "info" ? styles.activeTab : ""}`} onClick={() => setTab("info")}>▤ Presets & Export Info</button>
+        {/** <button className={`${styles.tabButton} ${tab === "info" ? styles.activeTab : ""}`} onClick={() => setTab("info")}>▤ Presets & Export Info</button> */}
       </nav>
 
       {error && <p className={styles.warningInline}>{error}</p>}
@@ -1709,7 +1860,7 @@ export default function PODDesignSuite() {
           Created by <a href="https://dev.jbqneto.com/" target="_blank" rel="noreferrer">JBQNETO</a>, but Credits to <a target="_blank" rel="noreferrer" href="https://www.youtube.com/watch?v=6VvXdQr-vzY">Alek</a>
         </span>
         <div className={styles.footerActions}>
-          <a className={styles.githubLink} href="https://github.com/jbqneto/podforge-studio" target="_blank" rel="noreferrer" aria-label="Open the GitHub repository">
+          <a className={styles.githubLink} href="https://github.com/jbqneto/pod-forge-studio" target="_blank" rel="noreferrer" aria-label="Open the GitHub repository">
             <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
               <path d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.68c-2.78.61-3.37-1.18-3.37-1.18-.46-1.17-1.12-1.48-1.12-1.48-.92-.63.07-.62.07-.62 1.02.07 1.56 1.05 1.56 1.05.9 1.55 2.36 1.1 2.93.84.09-.66.35-1.1.64-1.35-2.22-.26-4.56-1.11-4.56-4.94 0-1.09.39-1.98 1.03-2.68-.1-.26-.45-1.33.1-2.77 0 0 .84-.27 2.75 1.02a9.5 9.5 0 0 1 5 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.44.2 2.51.1 2.77.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.68-4.57 4.93.36.31.68.91.68 1.84v2.72c0 .26.18.58.69.48A10 10 0 0 0 12 2Z" />
             </svg>
@@ -2179,7 +2330,8 @@ function PreviewPanel(props: {
       ) : (
         <div className={styles.previewGrid}>
           {props.designs.map((design) => (
-            <article key={design.id} className={styles.previewCard}>
+            <article key={design.id} className={`${styles.previewCard} ${design.modified ? styles.modifiedPreviewCard : ""}`}>
+              {design.modified && <span className={styles.modifiedBadge}>Modified</span>}
               <button
                 aria-label={`Open enlarged preview for ${design.label}`}
                 className={`${styles.designSurface} ${getBackgroundClass(props.background, { checker: styles.checker })}`}

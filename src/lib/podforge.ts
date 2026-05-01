@@ -47,6 +47,7 @@ export type GeneratedDesign = {
   svg: string;
   source: GeneratedDesignSource;
   overrides: GeneratedDesignOverrides;
+  modified: boolean;
 };
 
 export type TextSettings = {
