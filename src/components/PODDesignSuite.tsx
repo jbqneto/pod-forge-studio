@@ -1,8 +1,8 @@
 "use client";
 
-import { ChangeEvent, useMemo, useRef, useState } from "react";
+import { ChangeEvent, type PointerEvent as ReactPointerEvent, type RefObject, type WheelEvent as ReactWheelEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
-  type Align,
+  Align,
   BASE_FONTS,
   COLOR_PRESETS,
   HEIGHT,
@@ -28,45 +28,50 @@ import {
   parseLines,
   placeholderGraphic,
   slugify,
-  splitText,
-  svgDataUrl,
-  svgToPngBlob,
-  type CustomFont,
-  type FontSource,
-  type GeneratedDesign,
-  type GraphicSettings,
-  type PatternPreset,
-  type PatternSettings,
-  type PreviewBackground,
-  type ToolTab,
-  type TextEffect,
-  type TextSettings,
-  type Transform,
+  splitText, svgToPngBlob,
+  CustomFont,
+  FontSource,
+  GeneratedDesign,
+  GraphicSettings,
+  PatternPreset,
+  PatternSettings,
+  PreviewBackground,
+  ToolTab,
+  TextEffect,
+  TextSettings,
+  Transform
 } from "@/lib/podforge";
+
 import { parseCsvByHeaders, parseSimpleList } from "../lib/design/csvParser";
 import { parseTemplatePlaceholders } from "../lib/design/placeholderParser";
 import styles from "./PODDesignSuite.module.css";
 import { parseTemplateInput } from "@/lib/templateParser";
 
-type ToolTab = "templates" | "graphic" | "pattern" | "info";
-type Align = "left" | "center" | "right";
-type Transform = "none" | "uppercase" | "lowercase" | "title";
-type TextEffect = "straight" | "archUp" | "archDown" | "circle" | "wave";
-type PreviewBackground = "transparent" | "white" | "black" | "brown" | "cream" | "forest";
-type FontSource = "google" | "custom";
-
-type CustomFont = {
-  name: string;
-  dataUrl: string;
-  format: string;
+type MockupRect = { x: number; y: number; w: number; h: number };
+type CanvasView = { zoom: number; panX: number; panY: number };
+type GuidePreset = "edges-center" | "quarters" | "thirds" | "eighths";
+type MockupEditorSnapshot = {
+  mockupName: string;
+  mockupBaseDataUrl: string;
+  mockupX: number;
+  mockupY: number;
+  mockupW: number;
+  mockupH: number;
+  activeMockupPresetId: string;
+  editingMockupId: string | null;
+  mockupViewport: CanvasView;
+  mockupSnapEnabled: boolean;
+  mockupGuidePreset: GuidePreset;
+  mockupSnapThreshold: number;
+  mockupGridStep: number;
 };
-
-type GeneratedDesign = {
-  id: string;
-  label: string;
-  filename: string;
-  svg: string;
+type PanGesture = {
+  startClientX: number;
+  startClientY: number;
+  startPanX: number;
+  startPanY: number;
 };
+type SnapGuide = { vertical: number | null; horizontal: number | null };
 
 type ZipProgress = {
   active: boolean;
@@ -84,61 +89,6 @@ type MockupPreset = {
   basePngPath: string;
   printArea: { x: number; y: number; w: number; h: number };
 };
-
-type TextSettings = {
-  fontFamily: string;
-  fontSource: FontSource;
-  color: string;
-  align: Align;
-  lineBreakMode: "single" | "word" | "two";
-  letterSpacing: number;
-  transform: Transform;
-  maxWidth: number;
-  fontSize: number;
-};
-
-type GraphicSettings = {
-  fontFamily: string;
-  fontSource: FontSource;
-  textColor: string;
-  fontSize: number;
-  letterSpacing: number;
-  transform: Transform;
-  effect: TextEffect;
-  curveIntensity: number;
-  sloganPosition: "above" | "below";
-  graphicSize: number;
-  graphicVertical: number;
-  graphicAlign: Align;
-  subText: string;
-  subFontFamily: string;
-  subFontSource: FontSource;
-  subTextColor: string;
-  subFontSize: number;
-  subLetterSpacing: number;
-  subEffect: TextEffect;
-};
-
-type PatternSettings = {
-  fontFamily: string;
-  fontSource: FontSource;
-  fontSize: number;
-  letterSpacing: number;
-  transform: Transform;
-  effect: "straight" | "archUp" | "archDown";
-  curveIntensity: number;
-  outlineColor: string;
-  outlineWidth: number;
-  patternScale: number;
-  patternOffsetX: number;
-  patternOffsetY: number;
-};
-
-type PatternPreset = {
-  id: string;
-  name: string;
-  dataUrl: string;
-};
 type StylePresetType = "text" | "graphic" | "pattern";
 type StylePreset = {
   id: string;
@@ -151,440 +101,173 @@ type StylePreset = {
   };
 };
 
-const WIDTH = 4500;
-const HEIGHT = 5400;
+type MockupGesture =
+  | {
+      mode: "move";
+      startClientX: number;
+      startClientY: number;
+      startRect: MockupRect;
+      stageWidth: number;
+      stageHeight: number;
+    }
+  | {
+      mode: "resize";
+      handle: "nw" | "ne" | "sw" | "se";
+      startClientX: number;
+      startClientY: number;
+      startRect: MockupRect;
+      stageWidth: number;
+      stageHeight: number;
+    };
+
 const MOCKUP_PRESETS: MockupPreset[] = [
   { id: "none", name: "No mockup", basePngPath: "", printArea: { x: 0, y: 0, w: 0, h: 0 } },
   { id: "tee-front-classic", name: "Classic Tee Front", basePngPath: "/forge/mockups/tee-front-classic.png", printArea: { x: 1320, y: 1290, w: 1860, h: 2232 } },
   { id: "hoodie-front-classic", name: "Classic Hoodie Front", basePngPath: "/forge/mockups/hoodie-front-classic.png", printArea: { x: 1410, y: 1450, w: 1680, h: 2016 } },
 ];
 
-const BASE_FONTS = [
-  "Bebas Neue",
-  "Anton",
-  "Archivo Black",
-  "Oswald",
-  "Playfair Display",
-  "Abril Fatface",
-  "DM Serif Display",
-  "Bungee",
-  "Space Grotesk",
-  "Permanent Marker",
-  "Caveat",
-  "Fraunces",
-];
-
-const HEAVY_FONTS = [
-  "Anton",
-  "Archivo Black",
-  "Bebas Neue",
-  "Bungee",
-  "Oswald",
-  "Abril Fatface",
-  "DM Serif Display",
-  "Permanent Marker",
-  "Playfair Display",
-  "Fraunces",
-];
-
-const COLOR_PRESETS = [
-  { label: "Black", value: "#111111" },
-  { label: "White", value: "#FFFFFF" },
-  { label: "Cream", value: "#F5E6D3" },
-  { label: "Rust", value: "#B84A1F" },
-  { label: "Forest", value: "#2D4F3F" },
-  { label: "Mustard", value: "#D4A017" },
-];
-
-const OUTLINE_PRESETS = [
-  { label: "White", value: "#FFFFFF" },
-  { label: "Cream", value: "#F5E6D3" },
-  { label: "Black", value: "#111111" },
-  { label: "Rust", value: "#B84A1F" },
-];
-
-const TEMPLATE_EXAMPLES = [
-  "{hobby} is my cardio",
-  "Powered by coffee and {noun}",
-  "Team {name}",
-  "I paused my {activity} to be here",
-  "{name}'s reading list",
-];
-
-const SLOGAN_EXAMPLES = [
-  "Raised on sweet tea and Jesus",
-  "Born to be wild, forced to work",
-  "Just a girl who loves horses",
-  "Small town girl, big city dreams",
-].join("\n");
-
-const PATTERN_SLOGANS = [
-  "DARLIN'",
-  "MAMA",
-  "HOWDY",
-  "Y'ALL",
-  "HOT MESS",
-  "WILD CHILD",
-  "COWGIRL",
-  "COUNTRY ROOTS",
-].join("\n");
-
-const defaultTextSettings: TextSettings = {
-  fontFamily: "Anton",
-  fontSource: "google",
-  color: "#111111",
-  align: "center",
-  lineBreakMode: "single",
-  letterSpacing: 3,
-  transform: "uppercase",
-  maxWidth: 76,
-  fontSize: 480,
+const MOCKUP_STORAGE_KEY = "podforge-studio.mockups.v1";
+const GUIDE_PRESETS: Record<GuidePreset, number[]> = {
+  "edges-center": [0, 0.5, 1],
+  quarters: [0, 0.25, 0.5, 0.75, 1],
+  thirds: [0, 1 / 3, 2 / 3, 1],
+  eighths: [0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1],
 };
+const DEFAULT_CANVAS_VIEW: CanvasView = { zoom: 1, panX: 0, panY: 0 };
+const MOCKUP_HISTORY_LIMIT = 30;
 
-const defaultGraphicSettings: GraphicSettings = {
-  fontFamily: "Anton",
-  fontSource: "google",
-  textColor: "#111111",
-  fontSize: 330,
-  letterSpacing: 8,
-  transform: "uppercase",
-  effect: "archUp",
-  curveIntensity: 60,
-  sloganPosition: "above",
-  graphicSize: 42,
-  graphicVertical: 0,
-  graphicAlign: "center",
-  subText: "NASHVILLE, TN",
-  subFontFamily: "Bebas Neue",
-  subFontSource: "google",
-  subTextColor: "#111111",
-  subFontSize: 210,
-  subLetterSpacing: 10,
-  subEffect: "straight",
-};
-
-const defaultPatternSettings: PatternSettings = {
-  fontFamily: "Anton",
-  fontSource: "google",
-  fontSize: 760,
-  letterSpacing: -5,
-  transform: "uppercase",
-  effect: "straight",
-  curveIntensity: 35,
-  outlineColor: "#FFFFFF",
-  outlineWidth: 34,
-  patternScale: 100,
-  patternOffsetX: 0,
-  patternOffsetY: 0,
-};
-
-function escapeXml(value: string) {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&apos;");
+function getGuidePositions(size: number, preset: GuidePreset) {
+  return GUIDE_PRESETS[preset].map((fraction) => size * fraction);
 }
 
-function slugify(value: string) {
-  return value
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 90) || "design";
-}
+function snapLeadingCandidate(value: number, targets: number[], threshold: number) {
+  let bestValue = value;
+  let bestGuide: number | null = null;
+  let bestDistance = threshold + 1;
 
-function parseLines(value: string) {
-  return value
-    .split(/\r?\n/g)
-    .map((line) => line.trim())
-    .filter(Boolean);
-}
-
-function applyTransform(value: string, transform: Transform) {
-  if (transform === "uppercase") return value.toUpperCase();
-  if (transform === "lowercase") return value.toLowerCase();
-  if (transform === "title") {
-    return value.replace(/\w\S*/g, (word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase());
-  }
-  return value;
-}
-
-function splitText(value: string, mode: TextSettings["lineBreakMode"]) {
-  if (mode === "word") return value.split(/\s+/g).filter(Boolean);
-  if (mode === "two") {
-    const words = value.split(/\s+/g).filter(Boolean);
-    const half = Math.ceil(words.length / 2);
-    return [words.slice(0, half).join(" "), words.slice(half).join(" ")].filter(Boolean);
-  }
-  return [value];
-}
-
-function svgDataUrl(svg: string) {
-  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
-}
-
-function formatFromMime(mime: string) {
-  if (mime.includes("woff2")) return "woff2";
-  if (mime.includes("woff")) return "woff";
-  if (mime.includes("opentype")) return "opentype";
-  return "truetype";
-}
-
-function fontFaceStyles(customFonts: CustomFont[]) {
-  return customFonts
-    .map(
-      (font) => `@font-face{font-family:'${font.name}';src:url('${font.dataUrl}') format('${font.format}');font-weight:400 900;font-style:normal;}`,
-    )
-    .join("\n");
-}
-
-function lineTextSvg(lines: string[], settings: TextSettings, customFonts: CustomFont[]) {
-  const x = settings.align === "left" ? WIDTH * 0.12 : settings.align === "right" ? WIDTH * 0.88 : WIDTH / 2;
-  const anchor = settings.align === "left" ? "start" : settings.align === "right" ? "end" : "middle";
-  const lineHeight = settings.fontSize * 1.05;
-  const totalHeight = lineHeight * lines.length;
-  const startY = HEIGHT / 2 - totalHeight / 2 + settings.fontSize * 0.85;
-  const customStyle = fontFaceStyles(customFonts);
-
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}">
-    <defs><style>${customStyle}</style></defs>
-    <rect width="100%" height="100%" fill="transparent"/>
-    <g font-family="${escapeXml(settings.fontFamily)}" font-size="${settings.fontSize}" font-weight="900" fill="${settings.color}" letter-spacing="${settings.letterSpacing}" text-anchor="${anchor}">
-      ${lines
-        .map(
-          (line, index) => `<text x="${x}" y="${startY + index * lineHeight}" dominant-baseline="middle">${escapeXml(line)}</text>`,
-        )
-        .join("\n")}
-    </g>
-  </svg>`;
-}
-
-function pathForEffect(effect: TextEffect | PatternSettings["effect"], intensity: number, y: number, id: string) {
-  const depth = 120 + intensity * 5;
-  if (effect === "archUp") {
-    return `<path id="${id}" d="M 650 ${y} Q ${WIDTH / 2} ${y - depth} ${WIDTH - 650} ${y}" fill="none"/>`;
-  }
-  if (effect === "archDown") {
-    return `<path id="${id}" d="M 650 ${y} Q ${WIDTH / 2} ${y + depth} ${WIDTH - 650} ${y}" fill="none"/>`;
-  }
-  if (effect === "wave") {
-    return `<path id="${id}" d="M 550 ${y} C 1250 ${y - depth} 1600 ${y + depth} 2250 ${y} S 3300 ${y - depth} 3950 ${y}" fill="none"/>`;
-  }
-  return "";
-}
-
-function textWithEffect(params: {
-  textValue: string;
-  effect: TextEffect;
-  intensity: number;
-  y: number;
-  fontFamily: string;
-  fontSize: number;
-  color: string;
-  letterSpacing: number;
-  pathId: string;
-  customFonts: CustomFont[];
-}) {
-  const value = escapeXml(params.textValue);
-  if (params.effect === "straight") {
-    return `<text x="${WIDTH / 2}" y="${params.y}" text-anchor="middle" dominant-baseline="middle" font-family="${escapeXml(params.fontFamily)}" font-size="${params.fontSize}" font-weight="900" fill="${params.color}" letter-spacing="${params.letterSpacing}">${value}</text>`;
-  }
-  if (params.effect === "circle") {
-    return `<defs><path id="${params.pathId}" d="M ${WIDTH / 2} ${params.y - 940} a 940 940 0 1 1 -1 0" fill="none"/></defs>
-      <text font-family="${escapeXml(params.fontFamily)}" font-size="${params.fontSize}" font-weight="900" fill="${params.color}" letter-spacing="${params.letterSpacing}">
-        <textPath href="#${params.pathId}" startOffset="25%" text-anchor="middle">${value}</textPath>
-      </text>`;
-  }
-  const path = pathForEffect(params.effect, params.intensity, params.y, params.pathId);
-  return `<defs>${path}</defs>
-    <text font-family="${escapeXml(params.fontFamily)}" font-size="${params.fontSize}" font-weight="900" fill="${params.color}" letter-spacing="${params.letterSpacing}">
-      <textPath href="#${params.pathId}" startOffset="50%" text-anchor="middle">${value}</textPath>
-    </text>`;
-}
-
-function placeholderGraphic() {
-  const boot = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 900">
-    <rect width="900" height="900" fill="transparent"/>
-    <g transform="translate(250 80)" fill="#d1b07c" stroke="#111" stroke-width="24" stroke-linejoin="round">
-      <path d="M155 20 C265 20 310 82 287 212 L248 464 C240 522 278 558 348 568 L548 596 C616 606 650 642 632 700 C618 746 575 768 503 766 L132 758 C74 756 37 722 45 670 L75 538 C98 445 116 305 105 122 C101 58 115 24 155 20 Z"/>
-      <path d="M95 546 C155 628 248 662 373 666 L616 670" fill="none"/>
-      <path d="M116 102 C164 150 220 176 282 180" fill="none"/>
-      <path d="M116 210 C164 250 213 270 262 270" fill="none"/>
-      <path d="M105 323 C151 356 195 374 238 378" fill="none"/>
-      <path d="M98 444 C142 474 184 488 224 492" fill="none"/>
-    </g>
-  </svg>`;
-  return svgDataUrl(boot);
-}
-
-function buildGraphicSvg(params: {
-  slogan: string;
-  graphicDataUrl: string;
-  settings: GraphicSettings;
-  customFonts: CustomFont[];
-}) {
-  const slogan = applyTransform(params.slogan, params.settings.transform);
-  const imageWidth = WIDTH * (params.settings.graphicSize / 100);
-  const imageHeight = imageWidth;
-  const x = params.settings.graphicAlign === "left" ? WIDTH * 0.1 : params.settings.graphicAlign === "right" ? WIDTH - imageWidth - WIDTH * 0.1 : (WIDTH - imageWidth) / 2;
-  const y = HEIGHT / 2 - imageHeight / 2 + params.settings.graphicVertical * 16;
-  const mainY = params.settings.sloganPosition === "above" ? 1170 : 4140;
-  const subY = params.settings.sloganPosition === "above" ? 4180 : 1070;
-  const customStyle = fontFaceStyles(params.customFonts);
-
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}">
-    <defs><style>${customStyle}</style></defs>
-    <rect width="100%" height="100%" fill="transparent"/>
-    ${textWithEffect({
-      textValue: slogan,
-      effect: params.settings.effect,
-      intensity: params.settings.curveIntensity,
-      y: mainY,
-      fontFamily: params.settings.fontFamily,
-      fontSize: params.settings.fontSize,
-      color: params.settings.textColor,
-      letterSpacing: params.settings.letterSpacing,
-      pathId: "main-path",
-      customFonts: params.customFonts,
-    })}
-    <image href="${params.graphicDataUrl}" x="${x}" y="${y}" width="${imageWidth}" height="${imageHeight}" preserveAspectRatio="xMidYMid meet"/>
-    ${
-      params.settings.subText.trim()
-        ? textWithEffect({
-            textValue: params.settings.subText.trim(),
-            effect: params.settings.subEffect,
-            intensity: 45,
-            y: subY,
-            fontFamily: params.settings.subFontFamily,
-            fontSize: params.settings.subFontSize,
-            color: params.settings.subTextColor,
-            letterSpacing: params.settings.subLetterSpacing,
-            pathId: "sub-path",
-            customFonts: params.customFonts,
-          })
-        : ""
+  for (const target of targets) {
+    const distance = Math.abs(value - target);
+    if (distance <= threshold && distance < bestDistance) {
+      bestDistance = distance;
+      bestValue = target;
+      bestGuide = target;
     }
-  </svg>`;
+  }
+
+  return { value: bestValue, guide: bestGuide };
 }
 
-function makePatternSvg(name: string, body: string) {
-  return svgDataUrl(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 160">${body}<text x="10" y="150" font-family="Arial" font-size="18" font-weight="900" fill="rgba(255,255,255,.88)" stroke="#111" stroke-width="2">${escapeXml(name)}</text></svg>`);
-}
+function snapRectMovement(
+  rect: MockupRect,
+  size: { width: number; height: number },
+  threshold: number,
+  preset: GuidePreset,
+) {
+  const xTargets = getGuidePositions(size.width, preset);
+  const yTargets = getGuidePositions(size.height, preset);
 
-function getPatternPresets(): PatternPreset[] {
-  return [
-    {
-      id: "realtree-camo",
-      name: "Realtree Camo",
-      dataUrl: makePatternSvg("CAMO", `<rect width="220" height="160" fill="#72522f"/><ellipse cx="45" cy="50" rx="55" ry="22" fill="#2f4325"/><ellipse cx="135" cy="35" rx="60" ry="20" fill="#8a6b35"/><path d="M20 125 C55 80 92 112 130 70 S190 90 218 40" fill="none" stroke="#1f311d" stroke-width="22"/><path d="M5 20 C38 78 82 10 120 72 S175 120 220 80" fill="none" stroke="#b2874c" stroke-width="16"/>`),
-    },
-    {
-      id: "mossy-oak-camo",
-      name: "Mossy Oak",
-      dataUrl: makePatternSvg("MOSS", `<rect width="220" height="160" fill="#1f311d"/><ellipse cx="35" cy="32" rx="58" ry="28" fill="#455f34"/><ellipse cx="132" cy="72" rx="74" ry="34" fill="#24391f"/><ellipse cx="185" cy="28" rx="60" ry="22" fill="#6d7445"/><path d="M0 118 C55 78 104 140 160 86 S200 62 220 76" fill="none" stroke="#0f1d13" stroke-width="24"/>`),
-    },
-    {
-      id: "leopard-print",
-      name: "Leopard",
-      dataUrl: makePatternSvg("LEOPARD", `<rect width="220" height="160" fill="#c99658"/>${Array.from({ length: 18 }).map((_, i) => `<ellipse cx="${(i * 47) % 220}" cy="${25 + ((i * 31) % 115)}" rx="${16 + (i % 3) * 5}" ry="${10 + (i % 2) * 5}" fill="#111"/><ellipse cx="${(i * 47) % 220}" cy="${25 + ((i * 31) % 115)}" rx="${8 + (i % 3) * 3}" ry="${5 + (i % 2) * 3}" fill="#d7ad6b"/>`).join("")}`),
-    },
-    {
-      id: "cow-print",
-      name: "Cow Print",
-      dataUrl: makePatternSvg("COW", `<rect width="220" height="160" fill="#fff"/><path d="M20 10 C68 0 73 35 50 56 C18 84 -20 44 20 10Z" fill="#111"/><path d="M130 20 C190 5 218 38 190 70 C150 110 88 76 130 20Z" fill="#111"/><path d="M48 112 C90 84 126 128 91 158 C58 186 8 142 48 112Z" fill="#111"/>`),
-    },
-    {
-      id: "american-flag",
-      name: "American Flag",
-      dataUrl: makePatternSvg("USA", `${Array.from({ length: 8 }).map((_, i) => `<rect y="${i * 20}" width="220" height="20" fill="${i % 2 ? "#fff" : "#b22234"}"/>`).join("")}<rect width="94" height="86" fill="#3c3b6e"/>${Array.from({ length: 18 }).map((_, i) => `<circle cx="${12 + (i % 6) * 14}" cy="${13 + Math.floor(i / 6) * 22}" r="3" fill="#fff"/>`).join("")}`),
-    },
-    {
-      id: "buffalo-plaid",
-      name: "Buffalo Plaid",
-      dataUrl: makePatternSvg("PLAID", `<rect width="220" height="160" fill="#b31d1d"/>${Array.from({ length: 6 }).map((_, i) => `<rect x="${i * 44}" width="22" height="160" fill="rgba(0,0,0,.55)"/><rect y="${i * 32}" width="220" height="16" fill="rgba(0,0,0,.55)"/>`).join("")}`),
-    },
-    {
-      id: "western-floral",
-      name: "Western Floral",
-      dataUrl: makePatternSvg("FLORAL", `<rect width="220" height="160" fill="#f4e2c9"/>${Array.from({ length: 10 }).map((_, i) => `<circle cx="${20 + (i * 43) % 200}" cy="${25 + (i * 29) % 110}" r="13" fill="#b66a6f"/><circle cx="${20 + (i * 43) % 200}" cy="${25 + (i * 29) % 110}" r="5" fill="#7c3e42"/><path d="M${25 + (i * 43) % 200} ${30 + (i * 29) % 110} q20 5 28 -14" stroke="#678456" stroke-width="7" fill="none"/>`).join("")}`),
-    },
-    {
-      id: "wood-grain",
-      name: "Wood Grain",
-      dataUrl: makePatternSvg("WOOD", `<rect width="220" height="160" fill="#9b6332"/>${Array.from({ length: 9 }).map((_, i) => `<path d="M0 ${i * 18 + 8} C60 ${i * 18 - 22} 120 ${i * 18 + 48} 220 ${i * 18 + 4}" fill="none" stroke="#5d351b" stroke-width="6"/>`).join("")}<ellipse cx="105" cy="80" rx="30" ry="16" fill="none" stroke="#5d351b" stroke-width="5"/>`),
-    },
-    {
-      id: "sunflower-field",
-      name: "Sunflower",
-      dataUrl: makePatternSvg("SUN", `<rect width="220" height="160" fill="#f4dd86"/>${Array.from({ length: 8 }).map((_, i) => `<g transform="translate(${25 + (i * 52) % 200} ${32 + (i * 41) % 110})"><circle r="8" fill="#51311d"/>${Array.from({ length: 10 }).map((__, j) => `<ellipse cx="${Math.cos((j/10)*6.28)*18}" cy="${Math.sin((j/10)*6.28)*18}" rx="6" ry="12" fill="#d8a017" transform="rotate(${j*36})"/>`).join("")}</g>`).join("")}`),
-    },
-    {
-      id: "serape-stripes",
-      name: "Serape Stripes",
-      dataUrl: makePatternSvg("SERAPE", `<rect width="220" height="160" fill="#c73e2d"/><rect x="20" width="18" height="160" fill="#f6c445"/><rect x="48" width="12" height="160" fill="#2d7f74"/><rect x="78" width="28" height="160" fill="#101828"/><rect x="126" width="16" height="160" fill="#fff0c6"/><rect x="158" width="26" height="160" fill="#cf6b2e"/><rect x="196" width="10" height="160" fill="#2d4f3f"/>`),
-    },
+  const xCandidates = [
+    { comparison: rect.x, apply: (target: number) => target },
+    { comparison: rect.x + rect.w / 2, apply: (target: number) => target - rect.w / 2 },
+    { comparison: rect.x + rect.w, apply: (target: number) => target - rect.w },
   ];
+  const yCandidates = [
+    { comparison: rect.y, apply: (target: number) => target },
+    { comparison: rect.y + rect.h / 2, apply: (target: number) => target - rect.h / 2 },
+    { comparison: rect.y + rect.h, apply: (target: number) => target - rect.h },
+  ];
+
+  let nextX = rect.x;
+  let nextY = rect.y;
+  let guideX: number | null = null;
+  let guideY: number | null = null;
+  let bestXDistance = threshold + 1;
+  let bestYDistance = threshold + 1;
+
+  for (const candidate of xCandidates) {
+    for (const target of xTargets) {
+      const distance = Math.abs(candidate.comparison - target);
+      if (distance <= threshold && distance < bestXDistance) {
+        bestXDistance = distance;
+        nextX = candidate.apply(target);
+        guideX = target;
+      }
+    }
+  }
+
+  for (const candidate of yCandidates) {
+    for (const target of yTargets) {
+      const distance = Math.abs(candidate.comparison - target);
+      if (distance <= threshold && distance < bestYDistance) {
+        bestYDistance = distance;
+        nextY = candidate.apply(target);
+        guideY = target;
+      }
+    }
+  }
+
+  return {
+    rect: { x: nextX, y: nextY, w: rect.w, h: rect.h },
+    guide: { vertical: guideX, horizontal: guideY } satisfies SnapGuide,
+  };
 }
 
-function buildPatternSvg(params: {
-  slogan: string;
-  pattern: PatternPreset;
-  settings: PatternSettings;
-  customFonts: CustomFont[];
-}) {
-  const textValue = applyTransform(params.slogan, params.settings.transform);
-  const tile = Math.max(120, 900 - params.settings.patternScale * 2.3);
-  const customStyle = fontFaceStyles(params.customFonts);
-  const baseTextAttrs = `font-family="${escapeXml(params.settings.fontFamily)}" font-size="${params.settings.fontSize}" font-weight="900" letter-spacing="${params.settings.letterSpacing}" fill="url(#texture)" stroke="${params.settings.outlineColor}" stroke-width="${params.settings.outlineWidth}" stroke-linejoin="round" paint-order="stroke fill"`;
-  const safeText = escapeXml(textValue);
-  const defs = `<defs><style>${customStyle}</style><pattern id="texture" patternUnits="userSpaceOnUse" width="${tile}" height="${tile}" patternTransform="translate(${params.settings.patternOffsetX} ${params.settings.patternOffsetY})"><image href="${params.pattern.dataUrl}" width="${tile}" height="${tile}" preserveAspectRatio="xMidYMid slice"/></pattern>${pathForEffect(params.settings.effect, params.settings.curveIntensity, 2600, "patternPath")}</defs>`;
-  const textNode = params.settings.effect === "straight"
-    ? `<text x="${WIDTH / 2}" y="${HEIGHT / 2}" text-anchor="middle" dominant-baseline="middle" ${baseTextAttrs}>${safeText}</text>`
-    : `<text ${baseTextAttrs}><textPath href="#patternPath" startOffset="50%" text-anchor="middle">${safeText}</textPath></text>`;
+function snapRectResize(
+  rect: MockupRect,
+  handle: "nw" | "ne" | "sw" | "se",
+  size: { width: number; height: number },
+  threshold: number,
+  preset: GuidePreset,
+) {
+  const xTargets = getGuidePositions(size.width, preset);
+  const yTargets = getGuidePositions(size.height, preset);
+  let nextX = rect.x;
+  let nextY = rect.y;
+  let nextW = rect.w;
+  let nextH = rect.h;
+  let guideX: number | null = null;
+  let guideY: number | null = null;
 
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}">
-    ${defs}
-    <rect width="100%" height="100%" fill="transparent"/>
-    ${textNode}
-  </svg>`;
-}
+  if (handle.includes("e")) {
+    const edge = rect.x + rect.w;
+    const snapped = snapLeadingCandidate(edge, xTargets, threshold);
+    if (snapped.guide !== null) {
+      nextW = snapped.value - rect.x;
+      guideX = snapped.guide;
+    }
+  }
 
-async function fileToDataUrl(file: File) {
-  return new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(file);
-  });
-}
+  if (handle.includes("w")) {
+    const snapped = snapLeadingCandidate(rect.x, xTargets, threshold);
+    if (snapped.guide !== null) {
+      nextX = snapped.value;
+      nextW = rect.x + rect.w - snapped.value;
+      guideX = snapped.guide;
+    }
+  }
 
-async function svgToPngBlob(svg: string): Promise<Blob> {
-  await document.fonts.ready;
-  const image = new Image();
-  image.decoding = "async";
-  const dataUrl = svgDataUrl(svg);
-  await new Promise<void>((resolve, reject) => {
-    image.onload = () => resolve();
-    image.onerror = () => reject(new Error("Failed to load SVG for export."));
-    image.src = dataUrl;
-  });
-  const canvas = document.createElement("canvas");
-  canvas.width = WIDTH;
-  canvas.height = HEIGHT;
-  const context = canvas.getContext("2d");
-  if (!context) throw new Error("Canvas is not supported by this browser.");
-  context.clearRect(0, 0, WIDTH, HEIGHT);
-  context.drawImage(image, 0, 0, WIDTH, HEIGHT);
-  return await new Promise<Blob>((resolve, reject) => {
-    canvas.toBlob((blob) => {
-      if (blob) resolve(blob);
-      else reject(new Error("Could not export PNG."));
-    }, "image/png");
-  });
+  if (handle.includes("s")) {
+    const edge = rect.y + rect.h;
+    const snapped = snapLeadingCandidate(edge, yTargets, threshold);
+    if (snapped.guide !== null) {
+      nextH = snapped.value - rect.y;
+      guideY = snapped.guide;
+    }
+  }
+
+  if (handle.includes("n")) {
+    const snapped = snapLeadingCandidate(rect.y, yTargets, threshold);
+    if (snapped.guide !== null) {
+      nextY = snapped.value;
+      nextH = rect.y + rect.h - snapped.value;
+      guideY = snapped.guide;
+    }
+  }
+
+  return {
+    rect: { x: nextX, y: nextY, w: nextW, h: nextH },
+    guide: { vertical: guideX, horizontal: guideY } satisfies SnapGuide,
+  };
 }
 
 function loadImage(src: string) {
@@ -621,34 +304,6 @@ async function composeMockupPngBlob(svg: string, mockup: MockupPreset) {
   }
 }
 
-function downloadBlob(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  URL.revokeObjectURL(url);
-}
-
-function getBackgroundClass(preview: PreviewBackground) {
-  if (preview === "transparent") return styles.checker;
-  return "";
-}
-
-function getBackgroundStyle(preview: PreviewBackground) {
-  const map: Record<PreviewBackground, string> = {
-    transparent: "transparent",
-    white: "#ffffff",
-    black: "#111111",
-    brown: "#5C3B28",
-    cream: "#F5E6D3",
-    forest: "#2D4F3F",
-  };
-  return preview === "transparent" ? {} : { background: map[preview] };
-}
-
 export default function PODDesignSuite() {
   const [tab, setTab] = useState<ToolTab>("graphic");
   const [template, setTemplate] = useState(TEMPLATE_EXAMPLES[0]);
@@ -682,14 +337,47 @@ export default function PODDesignSuite() {
   const [stylePresets, setStylePresets] = useState<StylePreset[]>([]);
   const [presetName, setPresetName] = useState("");
   const [activeMockupPresetId, setActiveMockupPresetId] = useState(MOCKUP_PRESETS[0].id);
+  const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
+  const [localMockups, setLocalMockups] = useState<MockupPreset[]>([]);
+  const [mockupName, setMockupName] = useState("");
+  const [mockupBaseDataUrl, setMockupBaseDataUrl] = useState("");
+  const [mockupX, setMockupX] = useState(1320);
+  const [mockupY, setMockupY] = useState(1290);
+  const [mockupW, setMockupW] = useState(1860);
+  const [mockupH, setMockupH] = useState(2232);
+  const [editingMockupId, setEditingMockupId] = useState<string | null>(null);
+  const [mockupNaturalSize, setMockupNaturalSize] = useState<{ width: number; height: number } | null>(null);
+  const [mockupGesture, setMockupGesture] = useState<MockupGesture | null>(null);
+  const [mockupViewport, setMockupViewport] = useState<CanvasView>(DEFAULT_CANVAS_VIEW);
+  const [mockupPanGesture, setMockupPanGesture] = useState<PanGesture | null>(null);
+  const [mockupSnapGuide, setMockupSnapGuide] = useState<SnapGuide>({ vertical: null, horizontal: null });
+  const [mockupSnapEnabled, setMockupSnapEnabled] = useState(true);
+  const [mockupGuidePreset, setMockupGuidePreset] = useState<GuidePreset>("quarters");
+  const [mockupSnapThreshold, setMockupSnapThreshold] = useState(28);
+  const [mockupGridStep, setMockupGridStep] = useState(24);
+  const [previewViewport, setPreviewViewport] = useState<CanvasView>(DEFAULT_CANVAS_VIEW);
+  const [previewPanGesture, setPreviewPanGesture] = useState<PanGesture | null>(null);
+  const [mockupUndoStack, setMockupUndoStack] = useState<MockupEditorSnapshot[]>([]);
+  const [mockupRedoStack, setMockupRedoStack] = useState<MockupEditorSnapshot[]>([]);
   const fontInputRef = useRef<HTMLInputElement | null>(null);
+  const workspaceInputRef = useRef<HTMLInputElement | null>(null);
+  const mockupInputRef = useRef<HTMLInputElement | null>(null);
+  const mockupStageRef = useRef<HTMLDivElement | null>(null);
+  const previewStageRef = useRef<HTMLDivElement | null>(null);
+  const mockupsLoadedRef = useRef(false);
 
   const checkerStyles = { checker: styles.checker };
 
   const basePatterns = useMemo(() => getPatternPresets(), []);
   const patterns = useMemo(() => [...basePatterns, ...customPatterns], [basePatterns, customPatterns]);
+  const mockups = useMemo(() => [...MOCKUP_PRESETS, ...localMockups], [localMockups]);
   const [activePatternId, setActivePatternId] = useState("realtree-camo");
   const activePattern = patterns.find((item) => item.id === activePatternId) || patterns[0];
+  const hasGeneratedTemplate = templateDesigns.length > 0;
+  const hasGeneratedGraphic = graphicDesigns.length > 0;
+  const hasGeneratedPattern = patternDesigns.length > 0;
+  const canUndoMockup = mockupUndoStack.length > 0;
+  const canRedoMockup = mockupRedoStack.length > 0;
 
   const allFonts = useMemo(
     () => [
@@ -718,6 +406,166 @@ export default function PODDesignSuite() {
   function getFontSource(fontFamily: string): FontSource {
     return customFonts.some((font) => font.name === fontFamily) ? "custom" : "google";
   }
+
+  function captureMockupSnapshot(): MockupEditorSnapshot {
+    return {
+      mockupName,
+      mockupBaseDataUrl,
+      mockupX,
+      mockupY,
+      mockupW,
+      mockupH,
+      activeMockupPresetId,
+      editingMockupId,
+      mockupViewport,
+      mockupSnapEnabled,
+      mockupGuidePreset,
+      mockupSnapThreshold,
+      mockupGridStep,
+    };
+  }
+
+  function restoreMockupSnapshot(snapshot: MockupEditorSnapshot) {
+    setMockupName(snapshot.mockupName);
+    setMockupBaseDataUrl(snapshot.mockupBaseDataUrl);
+    setMockupX(snapshot.mockupX);
+    setMockupY(snapshot.mockupY);
+    setMockupW(snapshot.mockupW);
+    setMockupH(snapshot.mockupH);
+    setActiveMockupPresetId(snapshot.activeMockupPresetId);
+    setEditingMockupId(snapshot.editingMockupId);
+    setMockupViewport(snapshot.mockupViewport);
+    setMockupSnapEnabled(snapshot.mockupSnapEnabled);
+    setMockupGuidePreset(snapshot.mockupGuidePreset);
+    setMockupSnapThreshold(snapshot.mockupSnapThreshold);
+    setMockupGridStep(snapshot.mockupGridStep);
+  }
+
+  function pushMockupHistory() {
+    const snapshot = captureMockupSnapshot();
+    setMockupUndoStack((current) => {
+      const next = [...current, snapshot];
+      return next.length > MOCKUP_HISTORY_LIMIT ? next.slice(next.length - MOCKUP_HISTORY_LIMIT) : next;
+    });
+    setMockupRedoStack([]);
+  }
+
+  function undoMockupHistory() {
+    setMockupUndoStack((current) => {
+      if (!current.length) return current;
+      const previous = current[current.length - 1];
+      const currentSnapshot = captureMockupSnapshot();
+      setMockupRedoStack((redo) => [currentSnapshot, ...redo].slice(0, MOCKUP_HISTORY_LIMIT));
+      restoreMockupSnapshot(previous);
+      return current.slice(0, -1);
+    });
+  }
+
+  function redoMockupHistory() {
+    setMockupRedoStack((current) => {
+      if (!current.length) return current;
+      const nextSnapshot = current[0];
+      const currentSnapshot = captureMockupSnapshot();
+      setMockupUndoStack((undo) => [...undo, currentSnapshot].slice(-MOCKUP_HISTORY_LIMIT));
+      restoreMockupSnapshot(nextSnapshot);
+      return current.slice(1);
+    });
+  }
+
+  useEffect(() => {
+    function isEditableTarget(target: EventTarget | null) {
+      return target instanceof HTMLElement && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable);
+    }
+
+    function onKeyDown(event: KeyboardEvent) {
+      if (isEditableTarget(event.target)) return;
+      const mod = event.metaKey || event.ctrlKey;
+      if (!mod) return;
+
+      if (event.key.toLowerCase() === "z" && tab === "info") {
+        event.preventDefault();
+        if (event.shiftKey) redoMockupHistory();
+        else undoMockupHistory();
+        return;
+      }
+
+      if (event.key.toLowerCase() === "y" && tab === "info") {
+        event.preventDefault();
+        redoMockupHistory();
+        return;
+      }
+
+      if (event.key === "0") {
+        event.preventDefault();
+        if (selectedPreview) resetPreviewViewport();
+        else if (tab === "info") resetMockupViewport();
+      }
+    }
+
+    function onEscape(event: KeyboardEvent) {
+      if (event.key !== "Escape" || !selectedPreview) return;
+      event.preventDefault();
+      setPreviewPanGesture(null);
+      setSelectedPreview(null);
+    }
+
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keydown", onEscape);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keydown", onEscape);
+    };
+  }, [selectedPreview, tab, canRedoMockup, canUndoMockup]);
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(MOCKUP_STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as MockupPreset[];
+      if (Array.isArray(parsed)) setLocalMockups(parsed);
+    } catch {
+      // Ignore malformed local storage and fall back to built-in mockups.
+    } finally {
+      mockupsLoadedRef.current = true;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!mockupsLoadedRef.current || typeof window === "undefined") return;
+    window.localStorage.setItem(MOCKUP_STORAGE_KEY, JSON.stringify(localMockups));
+  }, [localMockups]);
+
+  useEffect(() => {
+    const shouldRefresh =
+      (tab === "templates" && hasGeneratedTemplate) ||
+      (tab === "graphic" && hasGeneratedGraphic) ||
+      (tab === "pattern" && hasGeneratedPattern);
+
+    if (!shouldRefresh) return;
+
+    const timeout = window.setTimeout(() => {
+      if (tab === "templates") generateTemplateDesigns();
+      if (tab === "graphic") generateGraphicDesigns();
+      if (tab === "pattern") generatePatternDesigns();
+    }, 2000);
+
+    return () => window.clearTimeout(timeout);
+  }, [
+    activePatternId,
+    customFonts,
+    graphicDataUrl,
+    graphicSettings,
+    graphicSlogans,
+    hasGeneratedGraphic,
+    hasGeneratedPattern,
+    hasGeneratedTemplate,
+    patternSettings,
+    patternSlogans,
+    tab,
+    template,
+    templateValues,
+    textSettings,
+  ]);
 
   async function handleFontImport(event: ChangeEvent<HTMLInputElement>) {
     const files = Array.from(event.target.files || []);
@@ -914,6 +762,327 @@ export default function PODDesignSuite() {
     setActivePatternId(id);
   }
 
+  async function handleMockupImageUpload(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setError("Please upload an image file for the mockup base.");
+      return;
+    }
+    try {
+      const dataUrl = await fileToDataUrl(file);
+      const derivedName = file.name.replace(/\.[^.]+$/, "");
+      pushMockupHistory();
+      setMockupBaseDataUrl(dataUrl);
+      if (!mockupName.trim()) {
+        setMockupName(derivedName);
+      }
+    } catch (mockupError) {
+      setError(`Could not load mockup image. ${(mockupError as Error).message}`);
+    } finally {
+      event.target.value = "";
+    }
+  }
+
+  function saveLocalMockup() {
+    if (!mockupName.trim()) {
+      setError("Enter a mockup name.");
+      return;
+    }
+    if (!mockupBaseDataUrl) {
+      setError("Upload a base image for the mockup.");
+      return;
+    }
+    if (mockupW <= 0 || mockupH <= 0) {
+      setError("Mockup width and height must be greater than zero.");
+      return;
+    }
+
+    const nextPreset: MockupPreset = {
+      id: editingMockupId ?? `local-${slugify(mockupName)}-${Date.now()}`,
+      name: mockupName.trim(),
+      basePngPath: mockupBaseDataUrl,
+      printArea: { x: mockupX, y: mockupY, w: mockupW, h: mockupH },
+    };
+    pushMockupHistory();
+    setLocalMockups((current) => {
+      const filtered = current.filter((mockup) => mockup.id !== nextPreset.id);
+      return [nextPreset, ...filtered];
+    });
+    setActiveMockupPresetId(nextPreset.id);
+    setEditingMockupId(nextPreset.id);
+    setWorkspaceMenuOpen(false);
+    setError(null);
+  }
+
+  function editLocalMockup(mockupId: string) {
+    const mockup = localMockups.find((item) => item.id === mockupId);
+    if (!mockup) return;
+    pushMockupHistory();
+    setMockupName(mockup.name);
+    setMockupBaseDataUrl(mockup.basePngPath);
+    setMockupX(mockup.printArea.x);
+    setMockupY(mockup.printArea.y);
+    setMockupW(mockup.printArea.w);
+    setMockupH(mockup.printArea.h);
+    setActiveMockupPresetId(mockup.id);
+    setEditingMockupId(mockup.id);
+    setError(null);
+  }
+
+  function resetMockupEditor() {
+    pushMockupHistory();
+    setMockupName("");
+    setMockupBaseDataUrl("");
+    setMockupX(1320);
+    setMockupY(1290);
+    setMockupW(1860);
+    setMockupH(2232);
+    setMockupNaturalSize(null);
+    setMockupViewport(DEFAULT_CANVAS_VIEW);
+    setMockupPanGesture(null);
+    setMockupGesture(null);
+    setMockupSnapGuide({ vertical: null, horizontal: null });
+    setMockupSnapEnabled(true);
+    setMockupGuidePreset("quarters");
+    setMockupSnapThreshold(28);
+    setMockupGridStep(24);
+    setEditingMockupId(null);
+    setActiveMockupPresetId(MOCKUP_PRESETS[0].id);
+    setError(null);
+  }
+
+  function updateMockupRect(nextRect: MockupRect) {
+    const safeRect = {
+      x: Math.round(Math.max(0, nextRect.x)),
+      y: Math.round(Math.max(0, nextRect.y)),
+      w: Math.round(Math.max(40, nextRect.w)),
+      h: Math.round(Math.max(40, nextRect.h)),
+    };
+
+    if (mockupNaturalSize) {
+      safeRect.x = Math.min(safeRect.x, Math.max(0, mockupNaturalSize.width - safeRect.w));
+      safeRect.y = Math.min(safeRect.y, Math.max(0, mockupNaturalSize.height - safeRect.h));
+      safeRect.w = Math.min(safeRect.w, Math.max(40, mockupNaturalSize.width - safeRect.x));
+      safeRect.h = Math.min(safeRect.h, Math.max(40, mockupNaturalSize.height - safeRect.y));
+    }
+
+    setMockupX(safeRect.x);
+    setMockupY(safeRect.y);
+    setMockupW(safeRect.w);
+    setMockupH(safeRect.h);
+  }
+
+  function adjustViewportZoom(view: CanvasView, nextZoom: number, point: { x: number; y: number }) {
+    const clampedZoom = Math.min(2.5, Math.max(0.5, nextZoom));
+    const scale = clampedZoom / view.zoom;
+    return {
+      zoom: clampedZoom,
+      panX: point.x - (point.x - view.panX) * scale,
+      panY: point.y - (point.y - view.panY) * scale,
+    };
+  }
+
+  function startMockupPan(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!mockupStageRef.current || !mockupBaseDataUrl) return;
+    event.preventDefault();
+    pushMockupHistory();
+    setMockupPanGesture({
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startPanX: mockupViewport.panX,
+      startPanY: mockupViewport.panY,
+    });
+  }
+
+  function handleMockupWheel(event: ReactWheelEvent<HTMLDivElement>) {
+    if (!mockupStageRef.current || !mockupBaseDataUrl) return;
+    event.preventDefault();
+    pushMockupHistory();
+    const rect = mockupStageRef.current.getBoundingClientRect();
+    const point = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+    const delta = event.deltaY > 0 ? -0.1 : 0.1;
+    setMockupViewport((current) => adjustViewportZoom(current, current.zoom + delta, point));
+  }
+
+  function resetMockupViewport() {
+    pushMockupHistory();
+    setMockupViewport(DEFAULT_CANVAS_VIEW);
+    setMockupPanGesture(null);
+  }
+
+  function startMockupMove(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!mockupNaturalSize || !mockupStageRef.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    pushMockupHistory();
+    const stageRect = mockupStageRef.current.getBoundingClientRect();
+    setMockupGesture({
+      mode: "move",
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startRect: { x: mockupX, y: mockupY, w: mockupW, h: mockupH },
+      stageWidth: stageRect.width,
+      stageHeight: stageRect.height,
+    });
+  }
+
+  function startMockupResize(handle: "nw" | "ne" | "sw" | "se", event: ReactPointerEvent<HTMLButtonElement>) {
+    if (!mockupNaturalSize || !mockupStageRef.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    pushMockupHistory();
+    const stageRect = mockupStageRef.current.getBoundingClientRect();
+    setMockupGesture({
+      mode: "resize",
+      handle,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startRect: { x: mockupX, y: mockupY, w: mockupW, h: mockupH },
+      stageWidth: stageRect.width,
+      stageHeight: stageRect.height,
+    });
+  }
+
+  useEffect(() => {
+    if (!mockupGesture) return;
+
+    const onPointerMove = (event: PointerEvent) => {
+      const deltaX = event.clientX - mockupGesture.startClientX;
+      const deltaY = event.clientY - mockupGesture.startClientY;
+      const scaleX = mockupGesture.stageWidth / (mockupNaturalSize?.width || mockupGesture.stageWidth);
+      const scaleY = mockupGesture.stageHeight / (mockupNaturalSize?.height || mockupGesture.stageHeight);
+      const nextDeltaX = deltaX / Math.max(0.1, scaleX * mockupViewport.zoom);
+      const nextDeltaY = deltaY / Math.max(0.1, scaleY * mockupViewport.zoom);
+
+      if (mockupGesture.mode === "move") {
+        const nextRect = {
+          x: mockupGesture.startRect.x + nextDeltaX,
+          y: mockupGesture.startRect.y + nextDeltaY,
+          w: mockupGesture.startRect.w,
+          h: mockupGesture.startRect.h,
+        };
+        const snapped = mockupNaturalSize && mockupSnapEnabled
+          ? snapRectMovement(nextRect, mockupNaturalSize, mockupSnapThreshold, mockupGuidePreset)
+          : { rect: nextRect, guide: { vertical: null, horizontal: null } };
+        setMockupSnapGuide(snapped.guide);
+        updateMockupRect(snapped.rect);
+        return;
+      }
+
+      const { handle } = mockupGesture;
+      let nextX = mockupGesture.startRect.x;
+      let nextY = mockupGesture.startRect.y;
+      let nextW = mockupGesture.startRect.w;
+      let nextH = mockupGesture.startRect.h;
+
+      if (handle.includes("e")) nextW = mockupGesture.startRect.w + nextDeltaX;
+      if (handle.includes("s")) nextH = mockupGesture.startRect.h + nextDeltaY;
+      if (handle.includes("w")) {
+        nextX = mockupGesture.startRect.x + nextDeltaX;
+        nextW = mockupGesture.startRect.w - nextDeltaX;
+      }
+      if (handle.includes("n")) {
+        nextY = mockupGesture.startRect.y + nextDeltaY;
+        nextH = mockupGesture.startRect.h - nextDeltaY;
+      }
+
+      const snapped = mockupNaturalSize && mockupSnapEnabled
+        ? snapRectResize({ x: nextX, y: nextY, w: nextW, h: nextH }, handle, mockupNaturalSize, mockupSnapThreshold, mockupGuidePreset)
+        : { rect: { x: nextX, y: nextY, w: nextW, h: nextH }, guide: { vertical: null, horizontal: null } };
+      setMockupSnapGuide(snapped.guide);
+      updateMockupRect(snapped.rect);
+    };
+
+    const onPointerUp = () => {
+      setMockupGesture(null);
+      setMockupSnapGuide({ vertical: null, horizontal: null });
+    };
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    };
+  }, [mockupGesture, mockupNaturalSize, mockupViewport.zoom]);
+
+  useEffect(() => {
+    if (!mockupPanGesture) return;
+
+    const onPointerMove = (event: PointerEvent) => {
+      setMockupViewport((current) => ({
+        ...current,
+        panX: mockupPanGesture.startPanX + (event.clientX - mockupPanGesture.startClientX),
+        panY: mockupPanGesture.startPanY + (event.clientY - mockupPanGesture.startClientY),
+      }));
+    };
+
+    const onPointerUp = () => setMockupPanGesture(null);
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    };
+  }, [mockupPanGesture]);
+
+  function duplicateLocalMockup(mockupId: string) {
+    const mockup = localMockups.find((item) => item.id === mockupId);
+    if (!mockup) return;
+    const duplicated: MockupPreset = {
+      ...mockup,
+      id: `local-${slugify(mockup.name)}-copy-${Date.now()}`,
+      name: `${mockup.name} copy`,
+    };
+    setLocalMockups((current) => [duplicated, ...current]);
+    setActiveMockupPresetId(duplicated.id);
+    setEditingMockupId(duplicated.id);
+  }
+
+  function deleteLocalMockup(mockupId: string) {
+    setLocalMockups((current) => current.filter((mockup) => mockup.id !== mockupId));
+    if (activeMockupPresetId === mockupId) {
+      setActiveMockupPresetId(MOCKUP_PRESETS[0].id);
+    }
+    if (editingMockupId === mockupId) {
+      setEditingMockupId(null);
+    }
+  }
+
+  function exportMockupLibrary() {
+    const blob = new Blob(
+      [
+        JSON.stringify(
+          {
+            exportedAt: new Date().toISOString(),
+            localMockups,
+          },
+          null,
+          2,
+        ),
+      ],
+      { type: "application/json" },
+    );
+    downloadBlob(blob, "podforge-mockups.json");
+  }
+
+  async function importMockupLibrary(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      const raw = await file.text();
+      const parsed = JSON.parse(raw) as Partial<{ localMockups: MockupPreset[] }>;
+      if (Array.isArray(parsed.localMockups)) setLocalMockups(parsed.localMockups);
+      setError("Mockup library imported.");
+    } catch (mockupLibraryError) {
+      setError(`Could not import mockup library. ${(mockupLibraryError as Error).message}`);
+    } finally {
+      event.target.value = "";
+    }
+  }
+
   function exportWorkspace() {
     const workspace = {
       template,
@@ -925,12 +1094,55 @@ export default function PODDesignSuite() {
       patternSlogans,
       patternSettings,
       customPatterns,
+      localMockups,
       activePatternId,
+      activeMockupPresetId,
       exportedAt: new Date().toISOString(),
       note: "This workspace JSON excludes imported custom font binary data on purpose, but it includes custom pattern data URLs for the current session.",
     };
     const blob = new Blob([JSON.stringify(workspace, null, 2)], { type: "application/json" });
     downloadBlob(blob, "podforge-workspace.json");
+  }
+
+  async function importWorkspaceFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      const raw = await file.text();
+      const workspace = JSON.parse(raw) as Partial<{
+        template: string;
+        templateValues: string;
+        textSettings: TextSettings;
+        graphicSlogans: string;
+        graphicSettings: GraphicSettings;
+        graphicDataUrl: string;
+        patternSlogans: string;
+        patternSettings: PatternSettings;
+        customPatterns: PatternPreset[];
+        localMockups: MockupPreset[];
+        activePatternId: string;
+        activeMockupPresetId: string;
+      }>;
+
+      if (typeof workspace.template === "string") setTemplate(workspace.template);
+      if (typeof workspace.templateValues === "string") setTemplateValues(workspace.templateValues);
+      if (workspace.textSettings) setTextSettings(workspace.textSettings);
+      if (typeof workspace.graphicSlogans === "string") setGraphicSlogans(workspace.graphicSlogans);
+      if (workspace.graphicSettings) setGraphicSettings(workspace.graphicSettings);
+      if (typeof workspace.graphicDataUrl === "string") setGraphicDataUrl(workspace.graphicDataUrl);
+      if (typeof workspace.patternSlogans === "string") setPatternSlogans(workspace.patternSlogans);
+      if (workspace.patternSettings) setPatternSettings(workspace.patternSettings);
+      if (Array.isArray(workspace.customPatterns)) setCustomPatterns(workspace.customPatterns);
+      if (Array.isArray(workspace.localMockups)) setLocalMockups(workspace.localMockups);
+      if (typeof workspace.activePatternId === "string") setActivePatternId(workspace.activePatternId);
+      if (typeof workspace.activeMockupPresetId === "string") setActiveMockupPresetId(workspace.activeMockupPresetId);
+      setError("Workspace imported. Regenerate to refresh previews.");
+    } catch (workspaceError) {
+      setError(`Could not import workspace. ${(workspaceError as Error).message}`);
+    } finally {
+      event.target.value = "";
+      setWorkspaceMenuOpen(false);
+    }
   }
 
   function saveStylePreset(type: StylePresetType) {
@@ -975,7 +1187,69 @@ export default function PODDesignSuite() {
 
   const currentDesigns = tab === "templates" ? templateDesigns : tab === "graphic" ? graphicDesigns : patternDesigns;
   const currentPreviewBackground = tab === "pattern" ? patternPreviewBackground : previewBackground;
-  const activeMockupPreset = MOCKUP_PRESETS.find((preset) => preset.id === activeMockupPresetId) || MOCKUP_PRESETS[0];
+  const activeMockupPreset = mockups.find((preset) => preset.id === activeMockupPresetId) || mockups[0];
+
+  function openPreview(design: GeneratedDesign) {
+    setSelectedPreview(design);
+    setPreviewViewport(DEFAULT_CANVAS_VIEW);
+    setPreviewPanGesture(null);
+  }
+
+  function adjustPreviewZoom(view: CanvasView, nextZoom: number, point: { x: number; y: number }) {
+    const clampedZoom = Math.min(2.5, Math.max(0.5, nextZoom));
+    const scale = clampedZoom / view.zoom;
+    return {
+      zoom: clampedZoom,
+      panX: point.x - (point.x - view.panX) * scale,
+      panY: point.y - (point.y - view.panY) * scale,
+    };
+  }
+
+  function startPreviewPan(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!previewStageRef.current) return;
+    event.preventDefault();
+    setPreviewPanGesture({
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startPanX: previewViewport.panX,
+      startPanY: previewViewport.panY,
+    });
+  }
+
+  function handlePreviewWheel(event: ReactWheelEvent<HTMLDivElement>) {
+    if (!previewStageRef.current) return;
+    event.preventDefault();
+    const rect = previewStageRef.current.getBoundingClientRect();
+    const point = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+    const delta = event.deltaY > 0 ? -0.1 : 0.1;
+    setPreviewViewport((current) => adjustPreviewZoom(current, current.zoom + delta, point));
+  }
+
+  function resetPreviewViewport() {
+    setPreviewViewport(DEFAULT_CANVAS_VIEW);
+    setPreviewPanGesture(null);
+  }
+
+  useEffect(() => {
+    if (!previewPanGesture) return;
+
+    const onPointerMove = (event: PointerEvent) => {
+      setPreviewViewport((current) => ({
+        ...current,
+        panX: previewPanGesture.startPanX + (event.clientX - previewPanGesture.startClientX),
+        panY: previewPanGesture.startPanY + (event.clientY - previewPanGesture.startClientY),
+      }));
+    };
+
+    const onPointerUp = () => setPreviewPanGesture(null);
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    };
+  }, [previewPanGesture]);
 
   async function downloadMockupDesign(design: GeneratedDesign) {
     try {
@@ -994,6 +1268,20 @@ export default function PODDesignSuite() {
         multiple
         accept=".ttf,.otf,.woff,.woff2,font/ttf,font/otf,font/woff,font/woff2"
         onChange={handleFontImport}
+        className="sr-only"
+      />
+      <input
+        ref={workspaceInputRef}
+        type="file"
+        accept="application/json,.json"
+        onChange={importWorkspaceFile}
+        className="sr-only"
+      />
+      <input
+        ref={mockupInputRef}
+        type="file"
+        accept="application/json,.json"
+        onChange={importMockupLibrary}
         className="sr-only"
       />
 
@@ -1102,12 +1390,12 @@ export default function PODDesignSuite() {
             onDownload={downloadDesign}
             onDownloadMockup={downloadMockupDesign}
             onDownloadZip={() => downloadZip(currentDesigns, `${tab}-designs.zip`)}
-            onPreview={setSelectedPreview}
+            onPreview={openPreview}
             zipProgress={zipProgress}
             onCancelZip={() => {
               zipCancelRef.current = true;
             }}
-            mockupPresets={MOCKUP_PRESETS}
+            mockupPresets={mockups}
             activeMockupPresetId={activeMockupPresetId}
             setActiveMockupPresetId={setActiveMockupPresetId}
           />
@@ -1118,6 +1406,64 @@ export default function PODDesignSuite() {
           removeFont={(fontName) => setCustomFonts((fonts) => fonts.filter((font) => font.name !== fontName))}
           importFonts={() => fontInputRef.current?.click()}
           exportWorkspace={exportWorkspace}
+          mockups={mockups}
+          activeMockupPresetId={activeMockupPresetId}
+          setActiveMockupPresetId={setActiveMockupPresetId}
+          mockupName={mockupName}
+          setMockupName={setMockupName}
+          mockupBaseDataUrl={mockupBaseDataUrl}
+          mockupNaturalSize={mockupNaturalSize}
+          setMockupNaturalSize={setMockupNaturalSize}
+          mockupStageRef={mockupStageRef}
+          mockupViewport={mockupViewport}
+          setMockupViewport={setMockupViewport}
+          mockupSnapGuide={mockupSnapGuide}
+          mockupSnapEnabled={mockupSnapEnabled}
+          setMockupSnapEnabled={setMockupSnapEnabled}
+          mockupGuidePreset={mockupGuidePreset}
+          setMockupGuidePreset={setMockupGuidePreset}
+          mockupSnapThreshold={mockupSnapThreshold}
+          setMockupSnapThreshold={setMockupSnapThreshold}
+          mockupGridStep={mockupGridStep}
+          setMockupGridStep={setMockupGridStep}
+          pushMockupHistory={pushMockupHistory}
+          mockupX={mockupX}
+          setMockupX={(value) => {
+            pushMockupHistory();
+            setMockupX(value);
+          }}
+          mockupY={mockupY}
+          setMockupY={(value) => {
+            pushMockupHistory();
+            setMockupY(value);
+          }}
+          mockupW={mockupW}
+          setMockupW={(value) => {
+            pushMockupHistory();
+            setMockupW(value);
+          }}
+          mockupH={mockupH}
+          setMockupH={(value) => {
+            pushMockupHistory();
+            setMockupH(value);
+          }}
+          handleMockupImageUpload={handleMockupImageUpload}
+          startMockupPan={startMockupPan}
+          handleMockupWheel={handleMockupWheel}
+          startMockupMove={startMockupMove}
+          startMockupResize={startMockupResize}
+          saveLocalMockup={saveLocalMockup}
+          resetMockupEditor={resetMockupEditor}
+          resetMockupViewport={resetMockupViewport}
+          canUndoMockup={canUndoMockup}
+          canRedoMockup={canRedoMockup}
+          undoMockupHistory={undoMockupHistory}
+          redoMockupHistory={redoMockupHistory}
+          deleteLocalMockup={deleteLocalMockup}
+          duplicateLocalMockup={duplicateLocalMockup}
+          editLocalMockup={editLocalMockup}
+          exportMockupLibrary={exportMockupLibrary}
+          importMockupLibrary={() => mockupInputRef.current?.click()}
           stylePresets={stylePresets}
           presetName={presetName}
           setPresetName={setPresetName}
@@ -1130,17 +1476,69 @@ export default function PODDesignSuite() {
       <footer className={styles.footerBar}>
         <span>▣ 100% client-side: files never leave your browser.</span>
         <span>⚠ Current workspace is temporary browser memory.</span>
-        <span>Aa Import custom fonts for this session.</span>
-        <button className={styles.secondaryButton} onClick={exportWorkspace}>Export Workspace</button>
+        <span className={styles.footerCredits}>
+          Created by <a href="https://dev.jbqneto.com/" target="_blank" rel="noreferrer">JBQNETO</a>, but Credits to <a target="_blank" rel="noreferrer" href="https://www.youtube.com/watch?v=6VvXdQr-vzY">Alek</a>
+        </span>
+        <div className={styles.footerActions}>
+          <a className={styles.githubLink} href="https://github.com/jbqneto/podforge-studio" target="_blank" rel="noreferrer" aria-label="Open the GitHub repository">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.68c-2.78.61-3.37-1.18-3.37-1.18-.46-1.17-1.12-1.48-1.12-1.48-.92-.63.07-.62.07-.62 1.02.07 1.56 1.05 1.56 1.05.9 1.55 2.36 1.1 2.93.84.09-.66.35-1.1.64-1.35-2.22-.26-4.56-1.11-4.56-4.94 0-1.09.39-1.98 1.03-2.68-.1-.26-.45-1.33.1-2.77 0 0 .84-.27 2.75 1.02a9.5 9.5 0 0 1 5 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.44.2 2.51.1 2.77.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.68-4.57 4.93.36.31.68.91.68 1.84v2.72c0 .26.18.58.69.48A10 10 0 0 0 12 2Z" />
+            </svg>
+            GitHub
+          </a>
+          <div className={styles.workspaceMenuWrap}>
+            <button className={styles.secondaryButton} onClick={() => setWorkspaceMenuOpen((current) => !current)}>Workspace</button>
+            {workspaceMenuOpen && (
+              <div className={styles.workspaceMenu} role="menu" aria-label="Workspace actions">
+                <button className={styles.workspaceMenuItem} onClick={() => workspaceInputRef.current?.click()}>Import</button>
+                <button className={styles.workspaceMenuItem} onClick={exportWorkspace}>Export</button>
+              </div>
+            )}
+          </div>
+        </div>
       </footer>
 
       {selectedPreview && (
         <div className={styles.modalBackdrop} role="dialog" aria-modal="true">
           <div className={styles.modalContent}>
             <div className={styles.modalActions}>
-              <button className={styles.secondaryButton} onClick={() => setSelectedPreview(null)}>Close</button>
+              <div className={styles.modalViewTools}>
+                <button className={styles.smallButton} onClick={() => {
+                  const rect = previewStageRef.current?.getBoundingClientRect();
+                  const point = rect ? { x: rect.width / 2, y: rect.height / 2 } : { x: 0, y: 0 };
+                  setPreviewViewport((current) => adjustPreviewZoom(current, current.zoom - 0.1, point));
+                }}>-</button>
+                <button className={styles.smallButton} onClick={() => {
+                  const rect = previewStageRef.current?.getBoundingClientRect();
+                  const point = rect ? { x: rect.width / 2, y: rect.height / 2 } : { x: 0, y: 0 };
+                  setPreviewViewport((current) => adjustPreviewZoom(current, current.zoom + 0.1, point));
+                }}>+</button>
+                <button className={styles.smallButton} onClick={resetPreviewViewport}>Reset View</button>
+              </div>
+              <button className={styles.secondaryButton} onClick={() => {
+                setPreviewPanGesture(null);
+                setSelectedPreview(null);
+              }}>Close</button>
             </div>
-            <div className={`${styles.designSurface} ${getBackgroundClass(currentPreviewBackground, checkerStyles)}`} style={getBackgroundStyle(currentPreviewBackground)} dangerouslySetInnerHTML={{ __html: selectedPreview.svg }} />
+            <div
+              ref={previewStageRef}
+              className={styles.modalPreviewFrame}
+              onPointerDown={startPreviewPan}
+              onWheel={handlePreviewWheel}
+            >
+              <div
+                className={styles.modalPreviewCanvas}
+                style={{
+                  transform: `translate(${previewViewport.panX}px, ${previewViewport.panY}px) scale(${previewViewport.zoom})`,
+                }}
+              >
+                <div
+                  className={`${styles.designSurface} ${styles.modalPreview} ${getBackgroundClass(currentPreviewBackground, checkerStyles)}`}
+                  style={getBackgroundStyle(currentPreviewBackground)}
+                  dangerouslySetInnerHTML={{ __html: selectedPreview.svg }}
+                />
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -1473,6 +1871,52 @@ function InfoPanel(props: {
   removeFont: (fontName: string) => void;
   importFonts: () => void;
   exportWorkspace: () => void;
+  mockups: MockupPreset[];
+  activeMockupPresetId: string;
+  setActiveMockupPresetId: (value: string) => void;
+  mockupName: string;
+  setMockupName: (value: string) => void;
+  mockupBaseDataUrl: string;
+  mockupNaturalSize: { width: number; height: number } | null;
+  setMockupNaturalSize: (value: { width: number; height: number } | null) => void;
+  mockupStageRef: RefObject<HTMLDivElement | null>;
+  mockupViewport: CanvasView;
+  setMockupViewport: (value: CanvasView | ((current: CanvasView) => CanvasView)) => void;
+  mockupSnapGuide: SnapGuide;
+  mockupSnapEnabled: boolean;
+  setMockupSnapEnabled: (value: boolean) => void;
+  mockupGuidePreset: GuidePreset;
+  setMockupGuidePreset: (value: GuidePreset) => void;
+  mockupSnapThreshold: number;
+  setMockupSnapThreshold: (value: number) => void;
+  mockupGridStep: number;
+  setMockupGridStep: (value: number) => void;
+  pushMockupHistory: () => void;
+  mockupX: number;
+  setMockupX: (value: number) => void;
+  mockupY: number;
+  setMockupY: (value: number) => void;
+  mockupW: number;
+  setMockupW: (value: number) => void;
+  mockupH: number;
+  setMockupH: (value: number) => void;
+  handleMockupImageUpload: (event: ChangeEvent<HTMLInputElement>) => void;
+  startMockupPan: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  handleMockupWheel: (event: ReactWheelEvent<HTMLDivElement>) => void;
+  startMockupMove: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  startMockupResize: (handle: "nw" | "ne" | "sw" | "se", event: ReactPointerEvent<HTMLButtonElement>) => void;
+  saveLocalMockup: () => void;
+  resetMockupEditor: () => void;
+  resetMockupViewport: () => void;
+  canUndoMockup: boolean;
+  canRedoMockup: boolean;
+  undoMockupHistory: () => void;
+  redoMockupHistory: () => void;
+  editLocalMockup: (id: string) => void;
+  deleteLocalMockup: (id: string) => void;
+  duplicateLocalMockup: (id: string) => void;
+  exportMockupLibrary: () => void;
+  importMockupLibrary: () => void;
   stylePresets: StylePreset[];
   presetName: string;
   setPresetName: (value: string) => void;
@@ -1510,6 +1954,186 @@ function InfoPanel(props: {
           </div>
         )}
         <p className={styles.helpText}>Supported: .ttf, .otf, .woff, .woff2. Imported fonts are session-only.</p>
+      </div>
+      <div className={styles.infoCard}>
+        <h3>Local Mockups</h3>
+        <p className={styles.helpText}>Save reusable mockups with a base image and a drawing area. Stored in this browser only.</p>
+        <div className={styles.mockupToolbar}>
+          <div className={styles.mockupZoomControls}>
+            <button className={styles.smallButton} disabled={!props.canUndoMockup} onClick={props.undoMockupHistory}>Undo</button>
+            <button className={styles.smallButton} disabled={!props.canRedoMockup} onClick={props.redoMockupHistory}>Redo</button>
+            <button className={styles.smallButton} onClick={() => {
+              const rect = props.mockupStageRef.current?.getBoundingClientRect();
+              const point = rect ? { x: rect.width / 2, y: rect.height / 2 } : { x: 0, y: 0 };
+              props.pushMockupHistory();
+              props.setMockupViewport((current) => {
+                const clampedZoom = Math.min(2.5, Math.max(0.5, current.zoom - 0.1));
+                const scale = clampedZoom / current.zoom;
+                return {
+                  zoom: clampedZoom,
+                  panX: point.x - (point.x - current.panX) * scale,
+                  panY: point.y - (point.y - current.panY) * scale,
+                };
+              });
+            }}>-</button>
+            <span className={styles.mockupZoomLabel}>Zoom {Math.round(props.mockupViewport.zoom * 100)}%</span>
+            <button className={styles.smallButton} onClick={() => {
+              const rect = props.mockupStageRef.current?.getBoundingClientRect();
+              const point = rect ? { x: rect.width / 2, y: rect.height / 2 } : { x: 0, y: 0 };
+              props.pushMockupHistory();
+              props.setMockupViewport((current) => {
+                const clampedZoom = Math.min(2.5, Math.max(0.5, current.zoom + 0.1));
+                const scale = clampedZoom / current.zoom;
+                return {
+                  zoom: clampedZoom,
+                  panX: point.x - (point.x - current.panX) * scale,
+                  panY: point.y - (point.y - current.panY) * scale,
+                };
+              });
+            }}>+</button>
+            <button className={styles.smallButton} onClick={props.resetMockupViewport}>Reset View</button>
+          </div>
+          <p className={styles.helpText}>Drag the empty canvas to pan. Use the wheel to zoom. Snap guides appear when the print area nears centers and edges.</p>
+        </div>
+        <div className={styles.controlGroup}>
+          <h3>Snap & Guides</h3>
+          <label className={styles.toggleRow}>
+            <input type="checkbox" checked={props.mockupSnapEnabled} onChange={(event) => props.setMockupSnapEnabled(event.target.checked)} />
+            <span>Enable snapping</span>
+          </label>
+          <label className={styles.label}>Guide preset</label>
+          <select className={styles.select} value={props.mockupGuidePreset} onChange={(event) => props.setMockupGuidePreset(event.target.value as GuidePreset)}>
+            <option value="edges-center">Edges + center</option>
+            <option value="quarters">Quarters</option>
+            <option value="thirds">Thirds</option>
+            <option value="eighths">Fine grid</option>
+          </select>
+          <Range label="Snap tolerance" value={props.mockupSnapThreshold} min={8} max={60} step={1} onChange={props.setMockupSnapThreshold} suffix="px" />
+          <Range label="Grid step" value={props.mockupGridStep} min={12} max={80} step={2} onChange={props.setMockupGridStep} suffix="px" />
+        </div>
+        <div
+          ref={props.mockupStageRef}
+          className={styles.mockupStageViewport}
+          onPointerDown={props.startMockupPan}
+          onWheel={props.handleMockupWheel}
+          style={props.mockupNaturalSize ? { aspectRatio: `${props.mockupNaturalSize.width} / ${props.mockupNaturalSize.height}` } : undefined}
+        >
+          {props.mockupBaseDataUrl ? (
+            <>
+              <div className={styles.mockupRulerTop} />
+              <div className={styles.mockupRulerLeft} />
+            <div
+              className={styles.mockupCanvas}
+              style={{
+                transform: `translate(${props.mockupViewport.panX}px, ${props.mockupViewport.panY}px) scale(${props.mockupViewport.zoom})`,
+              }}
+            >
+              <img
+                src={props.mockupBaseDataUrl}
+                className={styles.mockupStageImage}
+                alt="Mockup base preview"
+                onLoad={(event) => props.setMockupNaturalSize({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })}
+              />
+              <div className={styles.mockupStageGrid} style={{ backgroundSize: `${props.mockupGridStep}px ${props.mockupGridStep}px` }} />
+              <div
+                className={styles.mockupStageOverlay}
+                onPointerDown={props.startMockupMove}
+                style={{
+                  left: props.mockupNaturalSize ? `${(Math.max(0, props.mockupX) / props.mockupNaturalSize.width) * 100}%` : `${Math.max(0, props.mockupX)}px`,
+                  top: props.mockupNaturalSize ? `${(Math.max(0, props.mockupY) / props.mockupNaturalSize.height) * 100}%` : `${Math.max(0, props.mockupY)}px`,
+                  width: props.mockupNaturalSize ? `${(Math.max(1, props.mockupW) / props.mockupNaturalSize.width) * 100}%` : `${Math.max(1, props.mockupW)}px`,
+                  height: props.mockupNaturalSize ? `${(Math.max(1, props.mockupH) / props.mockupNaturalSize.height) * 100}%` : `${Math.max(1, props.mockupH)}px`,
+                }}
+              />
+              <div className={styles.mockupOverlayMeta}>
+                x {Math.round(props.mockupX)} y {Math.round(props.mockupY)} w {Math.round(props.mockupW)} h {Math.round(props.mockupH)}
+              </div>
+              {props.mockupSnapGuide.vertical !== null && props.mockupNaturalSize && (
+                <div
+                  className={styles.mockupGuideVertical}
+                  style={{ left: `${(props.mockupSnapGuide.vertical / props.mockupNaturalSize.width) * 100}%` }}
+                />
+              )}
+              {props.mockupSnapGuide.horizontal !== null && props.mockupNaturalSize && (
+                <div
+                  className={styles.mockupGuideHorizontal}
+                  style={{ top: `${(props.mockupSnapGuide.horizontal / props.mockupNaturalSize.height) * 100}%` }}
+                />
+              )}
+              <button className={styles.mockupResizeHandleNW} onPointerDown={(event) => props.startMockupResize("nw", event)} aria-label="Resize mockup area from top left" />
+              <button className={styles.mockupResizeHandleNE} onPointerDown={(event) => props.startMockupResize("ne", event)} aria-label="Resize mockup area from top right" />
+              <button className={styles.mockupResizeHandleSW} onPointerDown={(event) => props.startMockupResize("sw", event)} aria-label="Resize mockup area from bottom left" />
+              <button className={styles.mockupResizeHandleSE} onPointerDown={(event) => props.startMockupResize("se", event)} aria-label="Resize mockup area from bottom right" />
+            </div>
+            </>
+          ) : (
+            <div className={styles.mockupStageEmpty}>Upload a base image to edit the print area visually.</div>
+          )}
+        </div>
+        <label className={styles.label}>Mockup name</label>
+        <input className={styles.input} value={props.mockupName} onChange={(event) => {
+          props.pushMockupHistory();
+          props.setMockupName(event.target.value);
+        }} />
+        <label className={styles.label}>Mockup base image</label>
+        <input className={styles.input} type="file" accept="image/png,image/jpeg,image/webp" onChange={props.handleMockupImageUpload} />
+        <div className={styles.gridTwo} style={{ marginTop: 12 }}>
+          <div>
+            <label className={styles.label}>Area X</label>
+            <input className={styles.input} type="number" value={props.mockupX} onChange={(event) => {
+              props.pushMockupHistory();
+              props.setMockupX(Number(event.target.value));
+            }} />
+          </div>
+          <div>
+            <label className={styles.label}>Area Y</label>
+            <input className={styles.input} type="number" value={props.mockupY} onChange={(event) => {
+              props.pushMockupHistory();
+              props.setMockupY(Number(event.target.value));
+            }} />
+          </div>
+          <div>
+            <label className={styles.label}>Area W</label>
+            <input className={styles.input} type="number" value={props.mockupW} onChange={(event) => {
+              props.pushMockupHistory();
+              props.setMockupW(Number(event.target.value));
+            }} />
+          </div>
+          <div>
+            <label className={styles.label}>Area H</label>
+            <input className={styles.input} type="number" value={props.mockupH} onChange={(event) => {
+              props.pushMockupHistory();
+              props.setMockupH(Number(event.target.value));
+            }} />
+          </div>
+        </div>
+        <div className={styles.row} style={{ marginTop: 12 }}>
+          <button className={styles.primaryButton} onClick={props.saveLocalMockup}>Save Mockup</button>
+          <button className={styles.secondaryButton} onClick={props.resetMockupEditor}>New Mockup</button>
+          <button className={styles.secondaryButton} onClick={props.exportMockupLibrary}>Export Library</button>
+          <button className={styles.secondaryButton} onClick={props.importMockupLibrary}>Import Library</button>
+        </div>
+        <div className={styles.controlGroup} style={{ marginTop: 16 }}>
+          <h3>Saved mockups</h3>
+          <label className={styles.label}>Choose mockup</label>
+          <select className={styles.select} value={props.activeMockupPresetId} onChange={(event) => {
+            props.pushMockupHistory();
+            props.setActiveMockupPresetId(event.target.value);
+          }}>
+            {props.mockups.map((mockup) => (
+              <option key={mockup.id} value={mockup.id}>{mockup.name}</option>
+            ))}
+          </select>
+          <div className={styles.chipList} style={{ marginTop: 12 }}>
+            {props.mockups.filter((mockup) => mockup.id.startsWith("local-")).map((mockup) => (
+              <div key={mockup.id} className={styles.row}>
+                <button className={`${styles.chip} ${props.activeMockupPresetId === mockup.id ? styles.activeChip : ""}`} onClick={() => props.editLocalMockup(mockup.id)}>{mockup.name}</button>
+                <button className={styles.smallButton} onClick={() => props.duplicateLocalMockup(mockup.id)}>Duplicate</button>
+                <button className={styles.smallButton} onClick={() => props.deleteLocalMockup(mockup.id)}>Delete</button>
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
       <div className={styles.infoCard}>
         <h3>StylePreset Entity</h3>
